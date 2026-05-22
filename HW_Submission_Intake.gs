@@ -1,0 +1,525 @@
+/**
+ * Homework Submission Processor — LQM Al-Falah 26
+ *
+ * Monitors a Gmail mailing list for student homework submissions. For each
+ * email that carries a PDF attachment, the script saves the file to the
+ * student's group Drive folder and logs the submission in that group's
+ * Google Sheet. Emails are labelled in Gmail so they are never processed twice.
+ *
+ * Runs on an hourly time-based trigger. Run installTrigger() once from the
+ * Apps Script editor to register it.
+ *
+ * ── Setup (one-time) ──────────────────────────────────────────────────────────
+ *   1. Open Google Apps Script (script.google.com) and paste this file.
+ *   2. Set MASTER_SHEET_ID (below) to your master Google Sheet's ID.
+ *   3. Run installTrigger() once from the editor to register the hourly job.
+ *   4. Authorise Gmail, Drive, and Sheets access when prompted.
+ *
+ * ── Google Sheet dependency (MASTER_SHEET_ID) ─────────────────────────────────
+ *   Tab: Graders
+ *     Col A  Grader ID
+ *     Col B  Name
+ *     Col C  Email
+ *     Col D  Phone
+ *     Col E  Comments
+ *
+ *   Tab: Groups
+ *     Col A  Group ID
+ *     Col B  Group Name
+ *     Col C  Group Lead
+ *     Col D  WhatsApp Link
+ *     Col E  Group Share Folder Link   (used by Group_Comm.gs; not read here)
+ *     Col F  HW Upload Folder Link     (Drive folder where PDFs are saved)
+ *     Col G  HW Submission Sheet Link  (Google Sheet where submission rows are logged)
+ *     Col H  Grader 1                  (Grader ID — looked up in Graders tab)
+ *     Col I  Grader 2                  (Grader ID — looked up in Graders tab)
+ *     Col J  Email Msg                 (checkbox; used by Group_Comm.gs; not read here)
+ *     NOTE: G00 must always be configured with valid links as the catch-all fallback.
+ *
+ *   Tab: Group_Members
+ *     Col A  Gender
+ *     Col B  Student Name
+ *     Col C  Age
+ *     Col D  Postal Code
+ *     Col E  FSA
+ *     Col F  City
+ *     Col G  Effective Email           (address the student sends homework from)
+ *     Col H  Mobile Phone
+ *     Col I  Student ID                (numeric, range 7001–7999)
+ *     Col J  Status
+ *     Col K  PC-4
+ *     Col L  Attendance
+ *     Col M  Group ID
+ *
+ *   Per-group HW Submission Sheet (URL from Groups tab, Col G)
+ *   Tab: HW_Submissions
+ *     Col A  Timestamp
+ *     Col B  Student ID
+ *     Col C  Student Name              (email username if student is unrecognised)
+ *     Col D  Lesson #
+ *     Col E  HW File Link
+ *     Col F  Grader
+ *     Col G  Grading Status            ("Assigned" for normal groups; "Incorrect submission" for G00)
+ *     Col H  Grade                     (filled in by grader)
+ *     Col I  Comments                  (filled in by grader)
+ *
+ * ── Gmail labels ──────────────────────────────────────────────────────────────
+ *   HW_Submitted             Processed successfully into the correct group.
+ *   HW Submission Error      Fell back to G00 (unknown student or bad group config).
+ *   HW No Attachment         Email had no PDF — needs manual follow-up.
+ *   HW Duplicate Submission  Student already has a row for this lesson — PDF not saved.
+ *   Labels are created automatically on first run if they do not exist.
+ *
+ * ── Functions ─────────────────────────────────────────────────────────────────
+ *   processHomeworkEmails()     Entry point. Searches Gmail for unlabelled
+ *                               submissions and calls processThread() on each.
+ *   processThread()             Handles one email thread: resolves the student
+ *                               and group, saves the PDF, logs the sheet row,
+ *                               and applies the appropriate Gmail label.
+ *   loadMasterData()            Reads Graders, Groups, and Group_Members tabs
+ *                               once per run and returns lookup maps.
+ *   lookupByEmail()             Finds a student record by sender email address.
+ *   lookupByStudentId()         Finds a student record by numeric Student ID.
+ *   resolveGroupWithFallback()  Returns the correct group for a student, falling
+ *                               back to G00 if the group is missing or
+ *                               misconfigured.
+ *   resolveGrader()             Picks a grader name for the group (random if two
+ *                               graders are assigned).
+ *   getPdfAttachments()         Filters a message's attachments to PDFs only.
+ *   extractEmail()              Strips display name from a "Name <addr>" header.
+ *   extractLessonId()           Parses a labelled lesson number (1–23) from body text.
+ *   extractLessonIdBroad()      Parses a lesson number from the subject: labelled
+ *                               pattern first, then any standalone number 1–23.
+ *   extractStudentId()          Parses a labelled student ID (7001–7999) from body text.
+ *   extractStudentIdBroad()     Parses a student ID from the subject: any 4-digit
+ *                               number in range 7001–7999 not adjacent to other digits,
+ *                               regardless of label.
+ *   extractDriveFolderId()      Pulls the folder ID from a Drive folder URL.
+ *   extractSheetId()            Pulls the sheet ID from a Google Sheets URL.
+ *   buildFilename()             Builds the saved PDF filename:
+ *                               L{nn}_{StudentID}_{originalName}.
+ *   ensureLabels()              Returns handles to all three Gmail labels,
+ *                               creating any that do not yet exist.
+ *   getOrCreateLabel()          Gets or creates a single Gmail label by name.
+ *   installTrigger()            One-time setup: registers the hourly trigger.
+ */
+
+// ─── Configuration ─────────────────────────────────────────────────────────────
+
+const MASTER_SHEET_ID  = '14T7CyfSsci-Va0FOIc2NJiQiQ8T6VuiNYC_A7TSIeuE';
+const MAILING_LIST     = 'alfalah26_hw@lqmississauga.com';
+const CATCH_ALL_GROUP  = 'G00';
+const SEARCH_WINDOW    = '2h'; // wider than 1-hour trigger to absorb timing drift
+
+const LABEL_PROCESSED     = 'HW_Submitted';
+const LABEL_ERROR         = 'HW Submission Error';
+const LABEL_NO_ATTACHMENT = 'HW No Attachment';
+const LABEL_DUPLICATE     = 'HW Duplicate Submission';
+const HW_SHEET_TAB        = 'HW_Submissions';
+
+// ─── Entry Point ───────────────────────────────────────────────────────────────
+
+function processHomeworkEmails() {
+  const labels = ensureLabels();
+  const master = loadMasterData();
+
+  // Only fetch threads that have NOT yet received any of our labels.
+  const query = [
+    `to:${MAILING_LIST}`,
+    `-label:${LABEL_PROCESSED}`,
+    `-label:"${LABEL_ERROR}"`,
+    `-label:"${LABEL_NO_ATTACHMENT}"`,
+    `-label:"${LABEL_DUPLICATE}"`,
+    `newer_than:${SEARCH_WINDOW}`,
+  ].join(' ');
+
+  const threads = GmailApp.search(query);
+  Logger.log(`Found ${threads.length} unprocessed thread(s).`);
+
+  for (const thread of threads) {
+    try {
+      processThread(thread, labels, master);
+    } catch (e) {
+      Logger.log(`Unhandled error on thread ${thread.getId()}: ${e}\n${e.stack}`);
+    }
+  }
+}
+
+// ─── Thread Processing ─────────────────────────────────────────────────────────
+
+function processThread(thread, labels, master) {
+  // Homework submissions are always single-message threads.
+  const message = thread.getMessages()[0];
+  const from    = extractEmail(message.getFrom());
+  const subject = message.getSubject() || '';
+  const body    = message.getPlainBody() || '';
+  const text    = `${subject} ${body}`;
+
+  // 1. Check for PDF attachments first — no PDFs means nothing to save.
+  const pdfs = getPdfAttachments(message);
+  if (pdfs.length === 0) {
+    thread.addLabel(labels.noAttachment);
+    Logger.log(`No PDF from ${from}. Labelled "${LABEL_NO_ATTACHMENT}".`);
+    return;
+  }
+
+  // 2. Resolve student.
+  //    Priority: broad student ID scan of subject → email lookup → labelled ID in body.
+  //    If a subject ID is in range but not in the sheet, fall back to email and note it.
+  let student = null;
+  let subjectSidComment = '';
+  const sidFromSubject = extractStudentIdBroad(subject);
+  if (sidFromSubject) {
+    student = lookupByStudentId(sidFromSubject, master.members);
+    if (!student) {
+      subjectSidComment = `Student ID ${sidFromSubject} from subject not found in directory; looked up by sender email instead.`;
+      student = lookupByEmail(from, master.members);
+    }
+  } else {
+    student = lookupByEmail(from, master.members);
+    if (!student) {
+      const sid = extractStudentId(body);
+      if (sid) student = lookupByStudentId(sid, master.members);
+    }
+  }
+
+  // 3. Resolve the group, falling back to G00 if needed.
+  const intendedGroupId = student ? student.groupId : null;
+  const { group, usingG00 } = resolveGroupWithFallback(intendedGroupId, master.groups);
+
+  if (!group) {
+    Logger.log(`G00 group is missing or misconfigured. Cannot process thread ${thread.getId()}.`);
+    thread.addLabel(labels.error);
+    return;
+  }
+
+  // 4. Parse lesson number — broad scan of subject first, then labelled pattern in body.
+  const lessonId = extractLessonIdBroad(subject) ?? extractLessonId(body);
+
+  // 5. Pick a grader name for this group.
+  const graderName = resolveGrader(group, master.graders);
+
+  // 6. Open the Drive folder and the submission sheet.
+  const folderId = extractDriveFolderId(group.hwUploadFolderLink);
+  const sheetId  = extractSheetId(group.hwSheetLink);
+  // resolveGroupWithFallback already verified these parse correctly,
+  // but guard here in case G00 itself is misconfigured.
+  if (!folderId || !sheetId) {
+    Logger.log(`Cannot parse folder/sheet IDs for group ${group.groupId}. Applying error label.`);
+    thread.addLabel(labels.error);
+    return;
+  }
+
+  const folder = DriveApp.getFolderById(folderId);
+  const ss     = SpreadsheetApp.openById(sheetId);
+  const sheet  = ss.getSheetByName(HW_SHEET_TAB);
+  if (!sheet) {
+    Logger.log(`Tab "${HW_SHEET_TAB}" not found in sheet ${sheetId}. Applying error label.`);
+    thread.addLabel(labels.error);
+    return;
+  }
+
+  // 7. Reject if this student has already submitted this lesson.
+  if (student && lessonId !== null && isDuplicateSubmission(sheet, student.studentId, lessonId)) {
+    thread.addLabel(labels.duplicate);
+    Logger.log(
+      `Duplicate submission from student ${student.studentId} for lesson ${lessonId}. ` +
+      `Labelled "${LABEL_DUPLICATE}".`
+    );
+    return;
+  }
+
+  // 8. Save the first PDF only and append a submission row.
+  if (pdfs.length > 1) {
+    Logger.log(`${pdfs.length} PDFs found from ${from}. Only the first will be saved.`);
+  }
+  const pdf      = pdfs[0];
+  const filename = buildFilename(lessonId, student ? student.studentId : null, pdf.getName());
+  const file     = folder.createFile(pdf.copyBlob().setName(filename));
+  const studentName = student ? student.studentName : from.split('@')[0];
+
+  sheet.appendRow([
+    new Date(),                                  // Timestamp
+    student   ? student.studentId   : '',        // Student ID
+    studentName,                                 // Student Name (email username if unknown)
+    lessonId !== null ? lessonId    : '',        // Lesson #
+    file.getUrl(),                               // HW File Link
+    graderName,                                  // Grader
+    usingG00 ? 'Incorrect submission' : 'Assigned', // Grading Status
+    '',                                          // Grade  (grader fills in)
+    subjectSidComment,                           // Comments (system note if subject ID was unrecognised)
+  ]);
+  Logger.log(
+    `Saved "${filename}" → group ${group.groupId}` +
+    (student ? ` (student ${student.studentId})` : ` (unknown student, logged as "${studentName}")`)
+  );
+
+  // 9. Label the thread so it is never reprocessed.
+  thread.addLabel(usingG00 ? labels.error : labels.processed);
+}
+
+// ─── Master Data Loader ────────────────────────────────────────────────────────
+
+/**
+ * Reads all three relevant tabs from the master sheet once per run
+ * and returns structured lookup maps.
+ */
+function loadMasterData() {
+  const ss = SpreadsheetApp.openById(MASTER_SHEET_ID);
+
+  // ── Graders tab ──────────────────────────────────────────────────────────
+  // Columns: Grader ID | Name | Email | Phone | Comments
+  const graderRows = ss.getSheetByName('Graders').getDataRange().getValues();
+  const graders = {};
+  for (let i = 1; i < graderRows.length; i++) {
+    const [id, name] = graderRows[i];
+    if (id) graders[String(id).trim()] = { name: String(name || '').trim() };
+  }
+
+  // ── Groups tab ───────────────────────────────────────────────────────────
+  // Columns: Group ID | Group Name | Group Lead | WhatsApp Link |
+  //          Group Share Folder Link | HW Upload Folder Link |
+  //          HW Submission Sheet Link | Grader 1 | Grader 2 | Email Msg
+  const groupRows = ss.getSheetByName('Groups').getDataRange().getValues();
+  const groups = {};
+  for (let i = 1; i < groupRows.length; i++) {
+    const [groupId, , , , , folderLink, sheetLink, grader1, grader2] = groupRows[i];
+    if (!groupId) continue;
+    groups[String(groupId).trim()] = {
+      groupId:          String(groupId).trim(),
+      hwUploadFolderLink: String(folderLink || '').trim(),
+      hwSheetLink:      String(sheetLink  || '').trim(),
+      grader1:          grader1 ? String(grader1).trim() : null,
+      grader2:          grader2 ? String(grader2).trim() : null,
+    };
+  }
+
+  // ── Group_Members tab ────────────────────────────────────────────────────
+  // Columns: Gender(0) | Student Name(1) | Age(2) | POSTALCODE(3) | FSA(4) |
+  //          City(5) | Effective Email(6) | Mobile Phone F(7) | Student ID(8) |
+  //          Status(9) | PC-4(10) | Attendance(11) | Group ID(12)
+  const memberRows = ss.getSheetByName('Group_Members').getDataRange().getValues();
+  const byEmail = {};
+  const bySid   = {};
+  for (let i = 1; i < memberRows.length; i++) {
+    const row         = memberRows[i];
+    const studentName = String(row[1]  || '').trim();
+    const email       = String(row[6]  || '').trim().toLowerCase();
+    const studentId   = String(row[8]  || '').trim();
+    const groupId     = String(row[12] || '').trim();
+    if (!studentId) continue;
+    const record = { studentName, studentId, groupId };
+    if (email)     byEmail[email]     = record;
+    if (studentId) bySid[studentId]   = record;
+  }
+
+  return { graders, groups, members: { byEmail, bySid } };
+}
+
+// ─── Student Lookups ───────────────────────────────────────────────────────────
+
+function lookupByEmail(email, members) {
+  return members.byEmail[email.toLowerCase()] || null;
+}
+
+function lookupByStudentId(sid, members) {
+  return members.bySid[String(sid)] || null;
+}
+
+// ─── Group Resolution ──────────────────────────────────────────────────────────
+
+/**
+ * Returns the group to use and whether it is the G00 fallback.
+ * Falls back to G00 (usingG00: true) when:
+ *   - groupId is null/empty (student not identified),
+ *   - groupId is G00 (student assigned to catch-all, i.e. not yet placed in a group),
+ *   - the group row is missing, or
+ *   - the group's folder/sheet links cannot be parsed.
+ */
+function resolveGroupWithFallback(groupId, groups) {
+  if (groupId && groupId !== CATCH_ALL_GROUP && groups[groupId]) {
+    const g = groups[groupId];
+    if (extractDriveFolderId(g.hwUploadFolderLink) && extractSheetId(g.hwSheetLink)) {
+      return { group: g, usingG00: false };
+    }
+    Logger.log(`Group ${groupId} has invalid folder/sheet links. Falling back to G00.`);
+  }
+
+  const g00 = groups[CATCH_ALL_GROUP];
+  if (!g00) {
+    Logger.log(`G00 row not found. Known group IDs: ${Object.keys(groups).join(', ')}`);
+    return { group: null, usingG00: true };
+  }
+  const g00FolderId = extractDriveFolderId(g00.hwUploadFolderLink);
+  const g00SheetId  = extractSheetId(g00.hwSheetLink);
+  if (!g00FolderId || !g00SheetId) {
+    Logger.log(`G00 link parsing failed.`);
+    Logger.log(`  hwUploadFolderLink = "${g00.hwUploadFolderLink}" → folderId = ${g00FolderId}`);
+    Logger.log(`  hwSheetLink        = "${g00.hwSheetLink}" → sheetId = ${g00SheetId}`);
+    return { group: null, usingG00: true };
+  }
+  return { group: g00, usingG00: true };
+}
+
+/**
+ * Returns the grader's name for the given group.
+ * Picks randomly when both Grader 1 and Grader 2 are set.
+ */
+function resolveGrader(group, graders) {
+  const candidates = [group.grader1, group.grader2].filter(Boolean);
+  if (candidates.length === 0) return '';
+  const id = candidates.length === 2
+    ? candidates[Math.floor(Math.random() * 2)]
+    : candidates[0];
+  return (graders[id] && graders[id].name) ? graders[id].name : '';
+}
+
+// ─── Parsing Helpers ───────────────────────────────────────────────────────────
+
+/** Returns only PDF attachments (checks MIME type and file extension). */
+function getPdfAttachments(message) {
+  return message.getAttachments().filter(a => {
+    const type = (a.getContentType() || '').toLowerCase();
+    const name = (a.getName()        || '').toLowerCase();
+    return type === 'application/pdf' || name.endsWith('.pdf');
+  });
+}
+
+/** Extracts a bare email address from a "Display Name <addr>" header. */
+function extractEmail(fromField) {
+  const match = fromField.match(/<([^>]+)>/);
+  return (match ? match[1] : fromField).trim().toLowerCase();
+}
+
+/**
+ * Looks for a labelled lesson number (1–23) in text.
+ * Recognises: "Lesson 5", "Lesson #5", "Lesson No. 5", "Lesson No 5".
+ * Used for body text. For subject scanning use extractLessonIdBroad().
+ */
+function extractLessonId(text) {
+  const match = /\blesson\s*(?:#|no\.?)?\s*(\d{1,2})\b/i.exec(text);
+  if (!match) return null;
+  const n = parseInt(match[1], 10);
+  return (n >= 1 && n <= 23) ? n : null;
+}
+
+/**
+ * Looks for a lesson number in the email subject with no label required.
+ * Tries the labelled pattern first for precision, then falls back to any
+ * standalone 1–2 digit number in range 1–23 not adjacent to other digits.
+ */
+function extractLessonIdBroad(text) {
+  const labeled = /\blesson\s*(?:#|no\.?)?\s*(\d{1,2})\b/i.exec(text);
+  if (labeled) {
+    const n = parseInt(labeled[1], 10);
+    if (n >= 1 && n <= 23) return n;
+  }
+  const pattern = /(?<!\d)(\d{1,2})(?!\d)/g;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    const n = parseInt(match[1], 10);
+    if (n >= 1 && n <= 23) return n;
+  }
+  return null;
+}
+
+/**
+ * Looks for a labelled student ID (7001–7999) in text.
+ * Recognises: "Student ID: 7042", "Student_ID 7042", "StudentID:7042".
+ * Used for body text. For subject scanning use extractStudentIdBroad().
+ */
+function extractStudentId(text) {
+  const match = /\bstudent[_ -]?id\s*[:#]?\s*(\d{4})\b/i.exec(text);
+  if (!match) return null;
+  const n = parseInt(match[1], 10);
+  return (n >= 7001 && n <= 7999) ? String(n) : null;
+}
+
+/**
+ * Looks for a student ID in the email subject with no label required.
+ * Matches any 4-digit number in range 7001–7999 that is not adjacent to
+ * other digits (so "701234" is ignored but "student7122" and "7231" both match).
+ */
+function extractStudentIdBroad(text) {
+  const match = /(?<!\d)(7\d{3})(?!\d)/.exec(text);
+  if (!match) return null;
+  const n = parseInt(match[1], 10);
+  return (n >= 7001 && n <= 7999) ? String(n) : null;
+}
+
+/** Extracts a folder ID from a Google Drive folder URL. */
+function extractDriveFolderId(url) {
+  if (!url) return null;
+  const match = url.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+  return match ? match[1] : null;
+}
+
+/** Extracts a sheet ID from a Google Sheets URL. */
+function extractSheetId(url) {
+  if (!url) return null;
+  const match = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  return match ? match[1] : null;
+}
+
+/**
+ * Builds the filename for a saved PDF.
+ * Format: {LessonNo}_{StudentID}_{originalName}
+ * Parts with no value are omitted.
+ */
+function buildFilename(lessonId, studentId, originalName) {
+  const parts = [];
+  if (lessonId  !== null && lessonId  !== undefined) parts.push('L' + String(lessonId).padStart(2, '0'));
+  if (studentId !== null && studentId !== undefined) parts.push(String(studentId));
+  parts.push(originalName || 'attachment.pdf');
+  return parts.join('_');
+}
+
+// ─── Duplicate Submission Check ────────────────────────────────────────────────
+
+/**
+ * Returns true if the HW_Submissions sheet already contains a row for the
+ * given studentId and lessonId. Only called when both values are known.
+ */
+function isDuplicateSubmission(sheet, studentId, lessonId) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return false;
+  // Read Student ID (col B) and Lesson # (col D) — columns 2 and 4, width 3.
+  const data = sheet.getRange(2, 2, lastRow - 1, 3).getValues();
+  const sid   = String(studentId).trim();
+  const lid   = String(lessonId).trim();
+  return data.some(row => String(row[0]).trim() === sid && String(row[2]).trim() === lid);
+}
+
+// ─── Label Helpers ─────────────────────────────────────────────────────────────
+
+function ensureLabels() {
+  return {
+    processed:    getOrCreateLabel(LABEL_PROCESSED),
+    error:        getOrCreateLabel(LABEL_ERROR),
+    noAttachment: getOrCreateLabel(LABEL_NO_ATTACHMENT),
+    duplicate:    getOrCreateLabel(LABEL_DUPLICATE),
+  };
+}
+
+function getOrCreateLabel(name) {
+  return GmailApp.getUserLabelByName(name) || GmailApp.createLabel(name);
+}
+
+// ─── Trigger Setup ─────────────────────────────────────────────────────────────
+
+/**
+ * Run this ONCE from the Apps Script editor.
+ * It removes any existing trigger for this script and creates a fresh hourly one.
+ */
+function installTrigger() {
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'processHomeworkEmails')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+
+  ScriptApp.newTrigger('processHomeworkEmails')
+    .timeBased()
+    .everyHours(1)
+    .create();
+
+  Logger.log('Hourly trigger installed for processHomeworkEmails.');
+}

@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# clasp (Google Apps Script CLI)
+# .clasp.json contains the scriptId and is safe to commit if you use clasp.
+# .clasprc.json contains OAuth tokens and must never be committed.
+.clasprc.json
+node_modules/
+package-lock.json
+
+# Editor
+.vscode/
+.idea/
+
+# Logs
+*.log
