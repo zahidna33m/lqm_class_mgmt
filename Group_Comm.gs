@@ -146,9 +146,9 @@ function createGraderDrafts() {
       const grader2Id = String(groupsData[j][8] || '').trim(); // Col I
       if (grader1Id !== graderId && grader2Id !== graderId) continue;
       assignedGroups.push({
-        groupId:          String(groupsData[j][0] || '').trim(), // Col A
-        groupName:        String(groupsData[j][1] || '').trim(), // Col B
-        sharedFolderLink: String(groupsData[j][4] || '').trim(), // Col E
+        groupId:     String(groupsData[j][0] || '').trim(), // Col A
+        groupName:   String(groupsData[j][1] || '').trim(), // Col B
+        hwSheetLink: String(groupsData[j][6] || '').trim(), // Col G
         grader1Id,
         grader2Id,
       });
@@ -193,8 +193,8 @@ function buildGroupTable(groups, graderNames) {
       .map(id => graderNames[id] || id)
       .join(', ');
 
-    const folderCell = g.sharedFolderLink
-      ? `<a href="${g.sharedFolderLink}">Open Folder</a>`
+    const folderCell = g.hwSheetLink
+      ? `<a href="${g.hwSheetLink}">Open HW Submissions Sheet</a>`
       : '—';
 
     return `<tr>
@@ -211,7 +211,7 @@ function buildGroupTable(groups, graderNames) {
         <th style="${thStyle}">Group ID</th>
         <th style="${thStyle}">Group Name</th>
         <th style="${thStyle}">Assigned Graders</th>
-        <th style="${thStyle}">Shared Folder</th>
+        <th style="${thStyle}">HW Submissions Google Sheet Link</th>
       </tr>
     </thead>
     <tbody>
@@ -239,7 +239,7 @@ function buildGraderEmailHtml(prefix, name, groupTable) {
 
 ${groupTable}
 
-<p>Group Shared Folder contains an HW Submissions Google Sheet that lists every student's homework. It also shows the assigned grader for each homework assignment. This is where graders pick up the grading task and capture the grade and their comments. Here's a high-level description of how graders may use this Google Sheet.</p>
+<p>The HW Submissions Google Sheet lists every student's homework. It also shows the assigned grader for each homework assignment. This is where graders pick up the grading task and capture the grade and their comments. Here's a high-level description of how graders may use this Google Sheet.</p>
 
 <ol style="line-height:1.9;">
   <li>Graders should first find the row assigned to them that is "not graded," meaning it has no value in the Grade column and the Grading Status is <strong>Assigned</strong>.</li>
