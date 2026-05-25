@@ -196,10 +196,7 @@ function processThread(thread, labels, master) {
   // 4. Parse lesson number — broad scan of subject first, then labelled pattern in body.
   const lessonId = extractLessonIdBroad(subject) ?? extractLessonId(body);
 
-  // 5. Pick a grader name for this group.
-  const graderName = resolveGrader(group, master.graders);
-
-  // 6. Open the Drive folder and the submission sheet.
+  // 5. Open the Drive folder and the submission sheet.
   const folderId = extractDriveFolderId(group.hwUploadFolderLink);
   const sheetId  = extractSheetId(group.hwSheetLink);
   // resolveGroupWithFallback already verified these parse correctly,
@@ -218,6 +215,11 @@ function processThread(thread, labels, master) {
     thread.addLabel(labels.error);
     return;
   }
+
+  // 6. Pick a grader for this group using count-based balancing: assign to
+  //    whichever grader has fewer existing rows in the sheet. Ties are broken
+  //    randomly. This converges to equal distribution regardless of sample size.
+  const graderName = resolveGrader(group, master.graders, sheet);
 
   // 7. Reject if this student has already submitted this lesson.
   if (student && lessonId !== null && isDuplicateSubmission(sheet, student.studentId, lessonId)) {
@@ -363,15 +365,34 @@ function resolveGroupWithFallback(groupId, groups) {
 
 /**
  * Returns the grader's name for the given group.
- * Picks randomly when both Grader 1 and Grader 2 are set.
+ * When both Grader 1 and Grader 2 are set, reads only the last row of the
+ * submission sheet to see who was assigned most recently, then picks the
+ * other one. This gives strict alternation going forward without touching
+ * historical data. If the last row's grader doesn't match either current
+ * grader (e.g. after a reassignment), falls back to a random pick so that
+ * alternation self-corrects from that point on with no manual intervention.
  */
-function resolveGrader(group, graders) {
+function resolveGrader(group, graders, sheet) {
   const candidates = [group.grader1, group.grader2].filter(Boolean);
   if (candidates.length === 0) return '';
-  const id = candidates.length === 2
-    ? candidates[Math.floor(Math.random() * 2)]
-    : candidates[0];
-  return (graders[id] && graders[id].name) ? graders[id].name : '';
+
+  const getName = id => (graders[id] && graders[id].name) ? graders[id].name : '';
+
+  if (candidates.length === 1) return getName(candidates[0]);
+
+  const name1 = getName(candidates[0]);
+  const name2 = getName(candidates[1]);
+
+  // Read only the last row's grader cell (Col F = column 6, 1-based).
+  const lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    const lastGrader = String(sheet.getRange(lastRow, 6).getValue() || '').trim();
+    if (lastGrader === name1) return name2;
+    if (lastGrader === name2) return name1;
+  }
+
+  // Sheet is empty or last grader doesn't match either current grader — pick randomly.
+  return Math.random() < 0.5 ? name1 : name2;
 }
 
 // ─── Parsing Helpers ───────────────────────────────────────────────────────────
