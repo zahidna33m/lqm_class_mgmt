@@ -5,10 +5,12 @@
  * Groups tab) and copies rows into the central "All HW Submissions" spreadsheet.
  * On each run:
  *   - New rows are appended.
- *   - Rows whose source data changed are updated in place (all 9 source columns
+ *   - Rows whose source data changed are updated in place (all 10 source columns
  *     plus a recalculated Internal Status).
  *   - Rows whose Student ID + Lesson # already exists elsewhere get "Duplicate".
  *   - Unchanged rows are skipped.
+ *   - Source rows missing a Submission ID (manually added rows) get a UUID
+ *     written back to the source sheet before being processed.
  *
  * Runs on an hourly time-based trigger. Run installAggregatorTrigger() once
  * from the Apps Script editor to register it.
@@ -20,18 +22,19 @@
  *   4. Authorise Sheets access when prompted.
  *
  * ── Output tab columns (AGG_TAB_NAME) ────────────────────────────────────────
- *   Col A  Timestamp
- *   Col B  Student ID
- *   Col C  Student Name
- *   Col D  Lesson #
- *   Col E  HW File Link
- *   Col F  Grader
- *   Col G  Grading Status
- *   Col H  Grade
- *   Col I  Comments
- *   Col J  Internal Status   ("Duplicate" when Student ID + Lesson # already exists; blank otherwise)
- *   Col K  Group ID
- *   Col L  Source Link       (URL of the Gxx HW_Submissions sheet this row came from)
+ *   Col A  Submission ID  (UUID — hidden; stable import key, immune to URL/format changes)
+ *   Col B  Timestamp
+ *   Col C  Student ID
+ *   Col D  Student Name
+ *   Col E  Lesson #
+ *   Col F  HW File Link
+ *   Col G  Grader
+ *   Col H  Grading Status
+ *   Col I  Grade
+ *   Col J  Comments
+ *   Col K  Internal Status   ("Duplicate" when Student ID + Lesson # already exists; blank otherwise)
+ *   Col L  Group ID
+ *   Col M  Source Link       (URL of the Gxx HW_Submissions sheet this row came from)
  */
 
 // ─── Configuration ─────────────────────────────────────────────────────────────
@@ -42,7 +45,7 @@ const AGG_TAB_NAME    = 'All_HW_Submissions';
 const SRC_TAB_NAME    = 'HW_Submissions';
 
 const AGG_HEADERS = [
-  'Timestamp', 'Student ID', 'Student Name', 'Lesson #', 'HW File Link',
+  'Submission ID', 'Timestamp', 'Student ID', 'Student Name', 'Lesson #', 'HW File Link',
   'Grader', 'Grading Status', 'Grade', 'Comments',
   'Internal Status', 'Group ID', 'Source Link',
 ];
@@ -56,9 +59,9 @@ function aggregateHomeworkSubmissions() {
 
   // ── Load existing output rows ─────────────────────────────────────────────
   //
-  // importKeyToEntry  Map<key, { rowNum: number, data: any[] }>
+  // importKeyToEntry  Map<uuid, { rowNum: number, data: any[] }>
   //   rowNum is the 1-based sheet row (2 = first data row after the header).
-  //   data   is the full 12-column array as read from the sheet.
+  //   data   is the full 13-column array as read from the sheet.
   //
   // studentLessonSet  Set<"studentId|lessonNo">
   //   Tracks all Student ID + Lesson # pairs currently in the output sheet so
@@ -71,15 +74,12 @@ function aggregateHomeworkSubmissions() {
   if (lastRow > 1) {
     const existing = aggTab.getRange(2, 1, lastRow - 1, AGG_HEADERS.length).getValues();
     for (let i = 0; i < existing.length; i++) {
-      const row        = existing[i];
-      const rowNum     = i + 2; // 1-based row number (1 = header, so data starts at 2)
-      const studentId  = String(row[1]  || '').trim();
-      const lessonNo   = String(row[3]  || '').trim();
-      const hwFileLink = String(row[4]  || '').trim();
-      const sourceLink = String(row[11] || '').trim();
-
-      importKeyToEntry.set(makeImportKey(hwFileLink, sourceLink, row[0], studentId),
-                           { rowNum, data: row });
+      const row       = existing[i];
+      const rowNum    = i + 2;
+      const uuid      = String(row[0] || '').trim();
+      const studentId = String(row[2] || '').trim();
+      const lessonNo  = String(row[4] || '').trim();
+      if (uuid) importKeyToEntry.set(uuid, { rowNum, data: row });
       if (studentId && lessonNo) studentLessonSet.add(`${studentId}|${lessonNo}`);
     }
   }
@@ -118,26 +118,45 @@ function aggregateHomeworkSubmissions() {
     const srcLastRow = srcTab.getLastRow();
     if (srcLastRow < 2) continue; // empty or header-only
 
-    const srcValues = srcTab.getRange(2, 1, srcLastRow - 1, 9).getValues();
+    // Read all 10 source columns (Submission ID through Comments).
+    const srcValues = srcTab.getRange(2, 1, srcLastRow - 1, 10).getValues();
+
+    // Fill missing UUIDs for any manually added rows, writing them back to the
+    // source sheet so they are stable on future runs.
+    const missingUuidRows = [];
+    for (let j = 0; j < srcValues.length; j++) {
+      if (!String(srcValues[j][0] || '').trim()) {
+        const newUuid   = Utilities.getUuid();
+        srcValues[j][0] = newUuid;
+        missingUuidRows.push([j + 2, newUuid]); // [1-based sheet row, uuid]
+      }
+    }
+    for (const [row, uuid] of missingUuidRows) {
+      srcTab.getRange(row, 1).setValue(uuid);
+    }
 
     for (const r of srcValues) {
-      const timestamp  = r[0];
-      const studentId  = String(r[1] || '').trim();
-      const lessonNo   = String(r[3] || '').trim();
-      const hwFileLink = String(r[4] || '').trim();
-      const srcData    = r.slice(0, 9); // the 9 source columns
+      const uuid      = String(r[0] || '').trim();
+      const studentId = String(r[2] || '').trim();
+      const lessonNo  = String(r[4] || '').trim();
+      const srcData   = r.slice(0, 10); // all 10 source columns
 
-      const importKey = makeImportKey(hwFileLink, sheetLink, timestamp, studentId);
+      if (!uuid) continue;
 
-      if (importKeyToEntry.has(importKey)) {
+      if (importKeyToEntry.has(uuid)) {
         // ── Row already in the output sheet — check for changes ─────────────
-        const entry = importKeyToEntry.get(importKey);
-        if (rowsEqual(entry.data.slice(0, 9), srcData)) continue; // nothing changed
+        const entry = importKeyToEntry.get(uuid);
+        // Compare columns 2–9 only (skip Submission ID at index 0 and Timestamp
+        // at index 1 — Timestamp never changes and floating-point round-trip
+        // differences cause false updates).
+        if (rowsEqual(entry.data.slice(2, 10), srcData.slice(2, 10))) {
+          continue; // nothing changed
+        }
 
         // Source data changed. Remove the old student|lesson pair so the
         // recalculated status doesn't treat the row as a duplicate of itself.
-        const oldStudentId = String(entry.data[1] || '').trim();
-        const oldLessonNo  = String(entry.data[3] || '').trim();
+        const oldStudentId = String(entry.data[2] || '').trim();
+        const oldLessonNo  = String(entry.data[4] || '').trim();
         if (oldStudentId && oldLessonNo) {
           studentLessonSet.delete(`${oldStudentId}|${oldLessonNo}`);
         }
@@ -150,7 +169,7 @@ function aggregateHomeworkSubmissions() {
 
         // Keep the cached entry current so later rows in this run see the
         // updated student|lesson pair, not the stale one.
-        importKeyToEntry.set(importKey, { rowNum: entry.rowNum, data: rowData });
+        importKeyToEntry.set(uuid, { rowNum: entry.rowNum, data: rowData });
 
       } else {
         // ── New row ──────────────────────────────────────────────────────────
@@ -158,7 +177,7 @@ function aggregateHomeworkSubmissions() {
         if (studentId && lessonNo) studentLessonSet.add(`${studentId}|${lessonNo}`);
 
         const rowData = [...srcData, internalStatus, groupId, sheetLink];
-        importKeyToEntry.set(importKey, { rowNum: -1, data: rowData });
+        importKeyToEntry.set(uuid, { rowNum: -1, data: rowData });
         newRows.push(rowData);
       }
     }
@@ -223,7 +242,6 @@ function getOrCreateAggTab(ss) {
     tab = ss.insertSheet(AGG_TAB_NAME);
     tab.appendRow(AGG_HEADERS);
     tab.setFrozenRows(1);
-    Logger.log(`Created tab "${AGG_TAB_NAME}" with headers.`);
     return tab;
   }
   if (tab.getLastRow() === 0) {
@@ -231,17 +249,6 @@ function getOrCreateAggTab(ss) {
     tab.setFrozenRows(1);
   }
   return tab;
-}
-
-/**
- * Builds a stable deduplication key for a source row.
- * HW File Link (a unique Drive URL) is the preferred key.
- * Falls back to sourceLink + timestamp + studentId when the file link is absent.
- */
-function makeImportKey(hwFileLink, sourceLink, timestamp, studentId) {
-  if (hwFileLink) return hwFileLink;
-  const ts = timestamp instanceof Date ? timestamp.getTime() : String(timestamp);
-  return `${sourceLink}|${ts}|${studentId}`;
 }
 
 /** Extracts a sheet ID from a Google Sheets URL. */

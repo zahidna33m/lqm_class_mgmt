@@ -53,15 +53,16 @@
  *
  *   Per-group HW Submission Sheet (URL from Groups tab, Col G)
  *   Tab: HW_Submissions
- *     Col A  Timestamp
- *     Col B  Student ID
- *     Col C  Student Name              (email username if student is unrecognised)
- *     Col D  Lesson #
- *     Col E  HW File Link
- *     Col F  Grader
- *     Col G  Grading Status            ("Assigned" for normal groups; "Incorrect submission" for G00)
- *     Col H  Grade                     (filled in by grader)
- *     Col I  Comments                  (filled in by grader)
+ *     Col A  Submission ID             (UUID — hidden; import key for the aggregator)
+ *     Col B  Timestamp
+ *     Col C  Student ID
+ *     Col D  Student Name              (email username if student is unrecognised)
+ *     Col E  Lesson #
+ *     Col F  HW File Link
+ *     Col G  Grader
+ *     Col H  Grading Status            ("Assigned" for normal groups; "Incorrect submission" for G00)
+ *     Col I  Grade                     (filled in by grader)
+ *     Col J  Comments                  (filled in by grader)
  *
  * ── Gmail labels ──────────────────────────────────────────────────────────────
  *   HW_Submitted             Processed successfully into the correct group.
@@ -241,15 +242,16 @@ function processThread(thread, labels, master) {
   const studentName = student ? student.studentName : from.split('@')[0];
 
   sheet.appendRow([
-    new Date(),                                  // Timestamp
-    student   ? student.studentId   : '',        // Student ID
-    studentName,                                 // Student Name (email username if unknown)
-    lessonId !== null ? lessonId    : '',        // Lesson #
-    file.getUrl(),                               // HW File Link
-    graderName,                                  // Grader
-    usingG00 ? 'Incorrect submission' : 'Assigned', // Grading Status
-    '',                                          // Grade  (grader fills in)
-    subjectSidComment,                           // Comments (system note if subject ID was unrecognised)
+    Utilities.getUuid(),                             // Submission ID (hidden import key)
+    new Date(),                                      // Timestamp
+    student   ? student.studentId   : '',            // Student ID
+    studentName,                                     // Student Name (email username if unknown)
+    lessonId !== null ? lessonId    : '',             // Lesson #
+    file.getUrl(),                                   // HW File Link
+    graderName,                                      // Grader
+    usingG00 ? 'Incorrect submission' : 'Assigned',  // Grading Status
+    '',                                              // Grade  (grader fills in)
+    subjectSidComment,                               // Comments (system note if subject ID was unrecognised)
   ]);
   Logger.log(
     `Saved "${filename}" → group ${group.groupId}` +
@@ -383,10 +385,10 @@ function resolveGrader(group, graders, sheet) {
   const name1 = getName(candidates[0]);
   const name2 = getName(candidates[1]);
 
-  // Read only the last row's grader cell (Col F = column 6, 1-based).
+  // Read only the last row's grader cell (Col G = column 7, 1-based).
   const lastRow = sheet.getLastRow();
   if (lastRow > 1) {
-    const lastGrader = String(sheet.getRange(lastRow, 6).getValue() || '').trim();
+    const lastGrader = String(sheet.getRange(lastRow, 7).getValue() || '').trim();
     if (lastGrader === name1) return name2;
     if (lastGrader === name2) return name1;
   }
@@ -504,8 +506,8 @@ function buildFilename(lessonId, studentId, originalName) {
 function isDuplicateSubmission(sheet, studentId, lessonId) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return false;
-  // Read Student ID (col B) and Lesson # (col D) — columns 2 and 4, width 3.
-  const data = sheet.getRange(2, 2, lastRow - 1, 3).getValues();
+  // Read Student ID (col C) and Lesson # (col E) — columns 3 and 5, width 3.
+  const data = sheet.getRange(2, 3, lastRow - 1, 3).getValues();
   const sid   = String(studentId).trim();
   const lid   = String(lessonId).trim();
   return data.some(row => String(row[0]).trim() === sid && String(row[2]).trim() === lid);
