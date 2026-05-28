@@ -1,17 +1,22 @@
 /**
  * Grader Status Report — LQM Al-Falah 26
  *
- * Creates a Gmail draft for each grader who has one or more homework rows with
- * a Grading Status of "Assigned" or "Grading in progress". Each draft includes
- * a breakdown of all three status counts and links to the grader's assigned
- * group HW Submission sheet(s).
+ * Notifies graders who have pending homework rows ("Assigned" or "Grading in
+ * progress") with a status summary and links to their assigned group sheet(s).
  *
- * Run createGraderStatusDrafts() from the "LQM Grading" menu added by
- * onOpen(), or directly from the Apps Script editor.
+ * Two delivery modes:
+ *   createGraderStatusDrafts()  — saves to Gmail Drafts for manual review
+ *                                 before sending. Available from the menu.
+ *   sendGraderStatusEmails()    — sends directly. Run by the twice-weekly
+ *                                 time-based trigger (Tuesday + Friday, 5 pm).
+ *
+ * Run installGraderStatusTriggers() once from the Apps Script editor to
+ * register the automatic schedule. Run createGraderStatusDrafts() from the
+ * "LQM Grading" menu to create drafts on demand.
  *
  * This script lives in the All HW Submissions spreadsheet's Apps Script
- * project and shares MASTER_SHEET_ID, AGG_SHEET_ID, and AGG_TAB_NAME with
- * HW_Submission_Aggregator.gs — those constants are not redeclared here.
+ * project and shares MASTER_SHEET_ID, AGG_SHEET_ID, AGG_TAB_NAME, and
+ * AGG_HEADERS with HW_Submission_Aggregator.gs — those are not redeclared here.
  *
  * ── Data sources ─────────────────────────────────────────────────────────────
  *   Aggregated sheet (AGG_TAB_NAME)
@@ -41,9 +46,21 @@ function onOpen() {
     .addToUi();
 }
 
-// ─── Entry Point ───────────────────────────────────────────────────────────────
+// ─── Public Entry Points ────────────────────────────────────────────────────────
 
+/** Saves one Gmail draft per grader with pending work. Run from the menu. */
 function createGraderStatusDrafts() {
+  processGraderStatus_(true);
+}
+
+/** Sends one email per grader with pending work. Run by the scheduled trigger. */
+function sendGraderStatusEmails() {
+  processGraderStatus_(false);
+}
+
+// ─── Core Logic ────────────────────────────────────────────────────────────────
+
+function processGraderStatus_(asDraft) {
   const masterSS = SpreadsheetApp.openById(MASTER_SHEET_ID);
   const aggTab   = SpreadsheetApp.openById(AGG_SHEET_ID).getSheetByName(AGG_TAB_NAME);
 
@@ -100,7 +117,7 @@ function createGraderStatusDrafts() {
     return;
   }
 
-  const aggData     = aggTab.getRange(2, 1, lastRow - 1, AGG_HEADERS.length).getValues();
+  const aggData      = aggTab.getRange(2, 1, lastRow - 1, AGG_HEADERS.length).getValues();
   const graderCounts = {}; // grader name (as in sheet) → { assigned, inProgress, complete }
 
   for (const row of aggData) {
@@ -111,14 +128,15 @@ function createGraderStatusDrafts() {
     if (!graderCounts[graderName]) {
       graderCounts[graderName] = { assigned: 0, inProgress: 0, complete: 0 };
     }
-    if      (gradingStatus === 'Assigned')             graderCounts[graderName].assigned++;
-    else if (gradingStatus === 'Grading in progress')  graderCounts[graderName].inProgress++;
-    else if (gradingStatus === 'Grading complete')     graderCounts[graderName].complete++;
+    if      (gradingStatus === 'Assigned')            graderCounts[graderName].assigned++;
+    else if (gradingStatus === 'Grading in progress') graderCounts[graderName].inProgress++;
+    else if (gradingStatus === 'Grading complete')    graderCounts[graderName].complete++;
   }
 
-  // ── Create a draft for each grader with pending work ─────────────────────
+  // ── Deliver to each grader with pending work ──────────────────────────────
 
-  let draftsCreated = 0;
+  const subject = 'LQM Al-Falah 26 — Homework Grading Status Update';
+  let delivered = 0;
 
   for (const [graderName, counts] of Object.entries(graderCounts)) {
     if (counts.assigned === 0 && counts.inProgress === 0) continue;
@@ -140,17 +158,19 @@ function createGraderStatusDrafts() {
     }
 
     const prefix   = grader.gender === 'F' ? 'Sr.' : 'Br.';
-    const subject  = 'LQM Al-Falah 26 — Homework Grading Status Update';
     const htmlBody = buildStatusEmailHtml(prefix, grader.name, counts, groups);
 
-    GmailApp.createDraft(grader.email, subject, '', { htmlBody });
-    Logger.log(`Draft created for ${grader.name} (${grader.email}) — ` +
-               `Assigned: ${counts.assigned}, In Progress: ${counts.inProgress}, ` +
-               `Complete: ${counts.complete}.`);
-    draftsCreated++;
+    if (asDraft) {
+      GmailApp.createDraft(grader.email, subject, '', { htmlBody });
+      Logger.log(`Draft created for ${grader.name} (${grader.email}).`);
+    } else {
+      GmailApp.sendEmail(grader.email, subject, '', { htmlBody });
+      Logger.log(`Email sent to ${grader.name} (${grader.email}).`);
+    }
+    delivered++;
   }
 
-  Logger.log(`Done. ${draftsCreated} draft(s) created.`);
+  Logger.log(`Done. ${delivered} email(s) ${asDraft ? 'drafted' : 'sent'}.`);
 }
 
 // ─── Email Builder ─────────────────────────────────────────────────────────────
@@ -184,4 +204,31 @@ function buildStatusEmailHtml(prefix, name, counts, groups) {
 
 </body>
 </html>`;
+}
+
+// ─── Trigger Setup ─────────────────────────────────────────────────────────────
+
+/**
+ * Run this ONCE from the Apps Script editor.
+ * Removes any existing triggers for sendGraderStatusEmails and registers
+ * two fresh ones — Tuesday and Friday at 5 pm.
+ */
+function installGraderStatusTriggers() {
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'sendGraderStatusEmails')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+
+  ScriptApp.newTrigger('sendGraderStatusEmails')
+    .timeBased()
+    .onWeekDay(ScriptApp.WeekDay.TUESDAY)
+    .atHour(17)
+    .create();
+
+  ScriptApp.newTrigger('sendGraderStatusEmails')
+    .timeBased()
+    .onWeekDay(ScriptApp.WeekDay.FRIDAY)
+    .atHour(17)
+    .create();
+
+  Logger.log('Triggers installed: sendGraderStatusEmails runs Tuesday and Friday at 5 pm.');
 }
