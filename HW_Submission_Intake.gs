@@ -69,6 +69,7 @@
  *   HW Submission Error      Fell back to G00 (unknown student or bad group config).
  *   HW No Attachment         Email had no PDF — needs manual follow-up.
  *   HW Duplicate Submission  Student already has a row for this lesson — PDF not saved.
+ *   HW_No_Group_Assigned     Student identified but not yet placed in a study group.
  *   Labels are created automatically on first run if they do not exist.
  *
  * ── Functions ─────────────────────────────────────────────────────────────────
@@ -99,6 +100,9 @@
  *   extractSheetId()            Pulls the sheet ID from a Google Sheets URL.
  *   buildFilename()             Builds the saved PDF filename:
  *                               L{nn}_{StudentID}_{originalName}.
+ *   buildNoPdfResponseHtml()    HTML body for the "no PDF attached" draft reply.
+ *   buildDuplicateResponseHtml() HTML body for the "duplicate submission" draft reply.
+ *   buildG00StudentResponseHtml() HTML body for the "student not in a group" draft reply.
  *   ensureLabels()              Returns handles to all three Gmail labels,
  *                               creating any that do not yet exist.
  *   getOrCreateLabel()          Gets or creates a single Gmail label by name.
@@ -116,6 +120,7 @@ const LABEL_PROCESSED     = 'HW_Submitted';
 const LABEL_ERROR         = 'HW Submission Error';
 const LABEL_NO_ATTACHMENT = 'HW No Attachment';
 const LABEL_DUPLICATE     = 'HW Duplicate Submission';
+const LABEL_NO_GROUP      = 'HW_No_Group_Assigned';
 const HW_SHEET_TAB        = 'HW_Submissions';
 
 // ─── Entry Point ───────────────────────────────────────────────────────────────
@@ -131,6 +136,7 @@ function processHomeworkEmails() {
     `-label:"${LABEL_ERROR}"`,
     `-label:"${LABEL_NO_ATTACHMENT}"`,
     `-label:"${LABEL_DUPLICATE}"`,
+    `-label:${LABEL_NO_GROUP}`,
     `newer_than:${SEARCH_WINDOW}`,
   ].join(' ');
 
@@ -160,7 +166,8 @@ function processThread(thread, labels, master) {
   const pdfs = getPdfAttachments(message);
   if (pdfs.length === 0) {
     thread.addLabel(labels.noAttachment);
-    Logger.log(`No PDF from ${from}. Labelled "${LABEL_NO_ATTACHMENT}".`);
+    message.createDraftReply('', { htmlBody: buildNoPdfResponseHtml(), name: 'Zahid Naeem (LQM)' });
+    Logger.log(`No PDF from ${from}. Labelled "${LABEL_NO_ATTACHMENT}", draft reply created.`);
     return;
   }
 
@@ -191,6 +198,15 @@ function processThread(thread, labels, master) {
   if (!group) {
     Logger.log(`G00 group is missing or misconfigured. Cannot process thread ${thread.getId()}.`);
     thread.addLabel(labels.error);
+    return;
+  }
+
+  // Scenario 6: Student is identified but their Group ID is G00 — they have not yet
+  // been placed in a real study group. Reply with guidance and skip G00 entry creation.
+  if (usingG00 && student && intendedGroupId === CATCH_ALL_GROUP) {
+    thread.addLabel(labels.noGroup);
+    message.createDraftReply('', { htmlBody: buildG00StudentResponseHtml(), name: 'Zahid Naeem (LQM)' });
+    Logger.log(`Student ${student.studentId} is assigned to G00. No G00 entry created; draft reply saved.`);
     return;
   }
 
@@ -225,9 +241,10 @@ function processThread(thread, labels, master) {
   // 7. Reject if this student has already submitted this lesson.
   if (student && lessonId !== null && isDuplicateSubmission(sheet, student.studentId, lessonId)) {
     thread.addLabel(labels.duplicate);
+    message.createDraftReply('', { htmlBody: buildDuplicateResponseHtml(), name: 'Zahid Naeem (LQM)' });
     Logger.log(
       `Duplicate submission from student ${student.studentId} for lesson ${lessonId}. ` +
-      `Labelled "${LABEL_DUPLICATE}".`
+      `Labelled "${LABEL_DUPLICATE}", draft reply created.`
     );
     return;
   }
@@ -513,6 +530,79 @@ function isDuplicateSubmission(sheet, studentId, lessonId) {
   return data.some(row => String(row[0]).trim() === sid && String(row[2]).trim() === lid);
 }
 
+// ─── Response Templates ────────────────────────────────────────────────────────
+
+function buildNoPdfResponseHtml() {
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family:Arial,sans-serif;font-size:14px;line-height:1.7;color:#222;max-width:680px;">
+
+<p>We were unable to process your submission because there was no PDF attached to your email.</p>
+
+<p><strong>Why this happened:</strong></p>
+<ul style="line-height:1.9;">
+  <li><strong>It was missed:</strong> You may have simply forgotten to attach the file before hitting send.</li>
+  <li><strong>A shared link was used:</strong> Our system cannot access links. If you sent a Google Drive or OneDrive link, the submission will fail.</li>
+  <li><strong>The file was too large:</strong> If your PDF is too large, your email provider may have automatically converted your attachment into a shared link without you realizing it.</li>
+</ul>
+
+<p><strong>How to resolve this:</strong></p>
+<ul style="line-height:1.9;">
+  <li><strong>Check the file size:</strong> To guarantee your email system attaches the file directly rather than turning it into a link, keep your PDF file size under 15 MB.</li>
+  <li><strong>Compress if necessary:</strong> If your file is larger than 15 MB, search online for a free PDF compression tool to reduce its size.</li>
+  <li><strong>Attach and resubmit:</strong> Upload the PDF as a direct attachment to a new email and send it through.</li>
+</ul>
+
+<p><em>System generated response.</em></p>
+
+</body>
+</html>`;
+}
+
+function buildDuplicateResponseHtml() {
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family:Arial,sans-serif;font-size:14px;line-height:1.7;color:#222;max-width:680px;">
+
+<p>We received your homework submission, but it was declined because it is a duplicate of one you already sent.</p>
+
+<p><strong>What this means for you:</strong></p>
+<ul style="line-height:1.9;">
+  <li>Your original submission was successfully received and has already been assigned for grading.</li>
+  <li>There is no further action needed on your part.</li>
+  <li>To help our system run smoothly, please ensure you only submit each lesson's homework once.</li>
+</ul>
+
+<p>Thank you for your cooperation and dedication to your studies!</p>
+
+<p><em>System generated response.</em></p>
+
+</body>
+</html>`;
+}
+
+function buildG00StudentResponseHtml() {
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family:Arial,sans-serif;font-size:14px;line-height:1.7;color:#222;max-width:680px;">
+
+<p>Thank you for submitting your homework assignment. Unfortunately, we are unable to accept it for grading at this time because you are not currently registered in a study group.</p>
+
+<p><strong>Why this matters:</strong> Our homework grading service is exclusively managed and structured around study group membership.</p>
+
+<p><strong>How to get your homework graded:</strong> To take full advantage of our grading system, you just need to join a group! Please reach out to the LQM team to discuss how you can join a study group and get your assignments on track for grading.</p>
+
+<p>We look forward to seeing your submissions once you are plugged into a group!</p>
+
+<p><em>System generated response.</em></p>
+
+</body>
+</html>`;
+}
+
 // ─── Label Helpers ─────────────────────────────────────────────────────────────
 
 function ensureLabels() {
@@ -521,6 +611,7 @@ function ensureLabels() {
     error:        getOrCreateLabel(LABEL_ERROR),
     noAttachment: getOrCreateLabel(LABEL_NO_ATTACHMENT),
     duplicate:    getOrCreateLabel(LABEL_DUPLICATE),
+    noGroup:      getOrCreateLabel(LABEL_NO_GROUP),
   };
 }
 
