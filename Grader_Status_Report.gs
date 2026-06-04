@@ -20,6 +20,7 @@
  *
  * ── Data sources ─────────────────────────────────────────────────────────────
  *   Aggregated sheet (AGG_TAB_NAME)
+ *     Col E  Lesson #
  *     Col G  Grader         (name — matched case-insensitively to Graders tab)
  *     Col H  Grading Status ("Assigned" / "Grading in progress" / "Grading complete")
  *
@@ -108,8 +109,8 @@ function processGraderStatus_(asDraft) {
     }
   }
 
-  // ── Count grading statuses per grader from the aggregated sheet ───────────
-  // Col G (index 6) = Grader, Col H (index 7) = Grading Status
+  // ── Count grading statuses per grader/lesson from the aggregated sheet ──────
+  // Col E (index 4) = Lesson #, Col G (index 6) = Grader, Col H (index 7) = Grading Status
 
   const lastRow = aggTab.getLastRow();
   if (lastRow < 2) {
@@ -118,19 +119,21 @@ function processGraderStatus_(asDraft) {
   }
 
   const aggData      = aggTab.getRange(2, 1, lastRow - 1, AGG_HEADERS.length).getValues();
-  const graderCounts = {}; // grader name (as in sheet) → { assigned, inProgress, complete }
+  const graderCounts = {}; // grader name → { byLesson: { lessonKey → { assigned, inProgress, complete } } }
 
   for (const row of aggData) {
     const graderName    = String(row[6] || '').trim();
     const gradingStatus = String(row[7] || '').trim();
+    const lessonNo      = String(row[4] || '').trim();
     if (!graderName) continue;
 
-    if (!graderCounts[graderName]) {
-      graderCounts[graderName] = { assigned: 0, inProgress: 0, complete: 0 };
-    }
-    if      (gradingStatus === 'Assigned')            graderCounts[graderName].assigned++;
-    else if (gradingStatus === 'Grading in progress') graderCounts[graderName].inProgress++;
-    else if (gradingStatus === 'Grading complete')    graderCounts[graderName].complete++;
+    if (!graderCounts[graderName]) graderCounts[graderName] = { byLesson: {} };
+    const bl = graderCounts[graderName].byLesson;
+    if (!bl[lessonNo]) bl[lessonNo] = { assigned: 0, inProgress: 0, complete: 0 };
+    const lc = bl[lessonNo];
+    if      (gradingStatus === 'Assigned')            lc.assigned++;
+    else if (gradingStatus === 'Grading in progress') lc.inProgress++;
+    else if (gradingStatus === 'Grading complete')    lc.complete++;
   }
 
   // ── Deliver to each grader with pending work ──────────────────────────────
@@ -138,8 +141,9 @@ function processGraderStatus_(asDraft) {
   const subject = 'LQM Al-Falah 26 — Homework Grading Status Update';
   let delivered = 0;
 
-  for (const [graderName, counts] of Object.entries(graderCounts)) {
-    if (counts.assigned === 0 && counts.inProgress === 0) continue;
+  for (const [graderName, data] of Object.entries(graderCounts)) {
+    const hasPending = Object.values(data.byLesson).some(lc => lc.assigned > 0 || lc.inProgress > 0);
+    if (!hasPending) continue;
 
     const grader = graderByName[graderName.toLowerCase()];
     if (!grader) {
@@ -158,7 +162,7 @@ function processGraderStatus_(asDraft) {
     }
 
     const prefix   = grader.gender === 'F' ? 'Sr.' : 'Br.';
-    const htmlBody = buildStatusEmailHtml(prefix, grader.name, counts, groups);
+    const htmlBody = buildStatusEmailHtml(prefix, grader.name, data.byLesson, groups);
 
     if (asDraft) {
       GmailApp.createDraft(grader.email, subject, '', { htmlBody });
@@ -175,7 +179,7 @@ function processGraderStatus_(asDraft) {
 
 // ─── Email Builder ─────────────────────────────────────────────────────────────
 
-function buildStatusEmailHtml(prefix, name, counts, groups) {
+function buildStatusEmailHtml(prefix, name, byLesson, groups) {
   return `<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"></head>
@@ -183,14 +187,10 @@ function buildStatusEmailHtml(prefix, name, counts, groups) {
 
 <p>Assalaamu alaykum ${prefix} ${name},</p>
 
-<p>Here is your twice-weekly update on your assigned Arabic homework grading tasks.</p>
+<p>Here is an update on your assigned Arabic homework grading tasks.</p>
 
 <p><strong>Your Current Status:</strong></p>
-<ul style="margin-top:0;line-height:1.9;">
-  <li>Assigned (Not Started): <strong>${counts.assigned}</strong></li>
-  <li>Grading in Progress: <strong>${counts.inProgress}</strong></li>
-  <li>Grading Complete: <strong>${counts.complete}</strong></li>
-</ul>
+${buildLessonTable(byLesson)}
 
 <p>You can access your homework grading tasks from the following Google Sheet(s):</p>
 <ul style="margin-top:0;line-height:1.9;">
@@ -204,6 +204,47 @@ function buildStatusEmailHtml(prefix, name, counts, groups) {
 
 </body>
 </html>`;
+}
+
+/**
+ * Builds an HTML table of per-lesson grading counts.
+ * Shows the 3 most recent lessons always; beyond that, only lessons with
+ * at least one "Assigned" or "Grading in progress" task.
+ */
+function buildLessonTable(byLesson) {
+  const sorted = Object.keys(byLesson)
+    .map(k => ({ key: k, num: k === '' ? -1 : (Number(k) || 0) }))
+    .sort((a, b) => b.num - a.num);
+
+  const top3 = sorted.slice(0, 3);
+  const rest  = sorted.slice(3).filter(({ key }) => {
+    const lc = byLesson[key];
+    return lc.assigned > 0 || lc.inProgress > 0;
+  });
+
+  const rows = [...top3, ...rest].map(({ key }) => {
+    const lc = byLesson[key];
+    return `      <tr>
+        <td style="padding:5px 16px;text-align:center;border-bottom:1px solid #e0e0e0;">${key || '—'}</td>
+        <td style="padding:5px 16px;text-align:center;border-bottom:1px solid #e0e0e0;">${lc.assigned}</td>
+        <td style="padding:5px 16px;text-align:center;border-bottom:1px solid #e0e0e0;">${lc.inProgress}</td>
+        <td style="padding:5px 16px;text-align:center;border-bottom:1px solid #e0e0e0;">${lc.complete}</td>
+      </tr>`;
+  }).join('\n');
+
+  return `<table style="border-collapse:collapse;margin-top:4px;margin-bottom:8px;">
+    <thead>
+      <tr style="background:#f0f0f0;">
+        <th style="padding:6px 16px;text-align:center;border-bottom:2px solid #bbb;">Lesson #</th>
+        <th style="padding:6px 16px;text-align:center;border-bottom:2px solid #bbb;">Assigned</th>
+        <th style="padding:6px 16px;text-align:center;border-bottom:2px solid #bbb;">Grading in Progress</th>
+        <th style="padding:6px 16px;text-align:center;border-bottom:2px solid #bbb;">Grading Complete</th>
+      </tr>
+    </thead>
+    <tbody>
+${rows}
+    </tbody>
+  </table>`;
 }
 
 // ─── Trigger Setup ─────────────────────────────────────────────────────────────
