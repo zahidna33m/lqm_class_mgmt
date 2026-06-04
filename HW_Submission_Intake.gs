@@ -157,7 +157,8 @@ function processHomeworkEmails() {
 function processThread(thread, labels, master) {
   // Homework submissions are always single-message threads.
   const message = thread.getMessages()[0];
-  const from    = extractEmail(message.getFrom());
+  const replyTo = message.getReplyTo();
+  const from    = extractEmail(replyTo && replyTo.trim() ? replyTo : message.getFrom());
   const subject = message.getSubject() || '';
   const body    = message.getPlainBody() || '';
   const text    = `${subject} ${body}`;
