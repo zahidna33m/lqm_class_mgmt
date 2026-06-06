@@ -163,11 +163,12 @@ function processThread(thread, labels, master) {
   const body    = message.getPlainBody() || '';
   const text    = `${subject} ${body}`;
 
+
   // 1. Check for PDF attachments first — no PDFs means nothing to save.
   const pdfs = getPdfAttachments(message);
   if (pdfs.length === 0) {
     thread.addLabel(labels.noAttachment);
-    message.createDraftReply('', { htmlBody: buildNoPdfResponseHtml(), name: 'Zahid Naeem (LQM)' });
+    message.createDraftReply('', { htmlBody: withQuotedOriginal(buildNoPdfResponseHtml(), message), name: 'Zahid Naeem (LQM)' }).send();
     Logger.log(`No PDF from ${from}. Labelled "${LABEL_NO_ATTACHMENT}", draft reply created.`);
     return;
   }
@@ -206,7 +207,7 @@ function processThread(thread, labels, master) {
   // been placed in a real study group. Reply with guidance and skip G00 entry creation.
   if (usingG00 && student && intendedGroupId === CATCH_ALL_GROUP) {
     thread.addLabel(labels.noGroup);
-    message.createDraftReply('', { htmlBody: buildG00StudentResponseHtml(), name: 'Zahid Naeem (LQM)' });
+    message.createDraftReply('', { htmlBody: withQuotedOriginal(buildG00StudentResponseHtml(), message), name: 'Zahid Naeem (LQM)' }).send();
     Logger.log(`Student ${student.studentId} is assigned to G00. No G00 entry created; draft reply saved.`);
     return;
   }
@@ -242,7 +243,7 @@ function processThread(thread, labels, master) {
   // 7. Reject if this student has already submitted this lesson.
   if (student && lessonId !== null && isDuplicateSubmission(sheet, student.studentId, lessonId)) {
     thread.addLabel(labels.duplicate);
-    message.createDraftReply('', { htmlBody: buildDuplicateResponseHtml(), name: 'Zahid Naeem (LQM)' });
+    message.createDraftReply('', { htmlBody: withQuotedOriginal(buildDuplicateResponseHtml(), message), name: 'Zahid Naeem (LQM)' }).send();
     Logger.log(
       `Duplicate submission from student ${student.studentId} for lesson ${lessonId}. ` +
       `Labelled "${LABEL_DUPLICATE}", draft reply created.`
@@ -602,6 +603,28 @@ function buildG00StudentResponseHtml() {
 
 </body>
 </html>`;
+}
+
+// ─── Quote Helper ──────────────────────────────────────────────────────────────
+
+/**
+ * Appends a Gmail-style quoted block of the original message to an HTML response.
+ * Inserts just before </body> so the response builders stay unchanged.
+ */
+function withQuotedOriginal(htmlBody, message) {
+  const date         = message.getDate().toLocaleString();
+  const from         = message.getFrom();
+  const originalBody = message.getBody() ||
+                       message.getPlainBody().replace(/(?:\r\n|\r|\n)/g, '<br>');
+
+  const quoted = `
+<br>
+<div style="border-left:2px solid #ccc;padding-left:12px;margin-top:16px;color:#555;">
+  <p style="margin:0 0 6px 0;font-size:13px;color:#666;">On ${date}, ${from} wrote:</p>
+  <div>${originalBody}</div>
+</div>`;
+
+  return htmlBody.replace('</body>', quoted + '\n</body>');
 }
 
 // ─── Label Helpers ─────────────────────────────────────────────────────────────
