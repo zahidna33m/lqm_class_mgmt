@@ -243,7 +243,7 @@ function processThread(thread, labels, master) {
   // 7. Reject if this student has already submitted this lesson.
   if (student && lessonId !== null && isDuplicateSubmission(sheet, student.studentId, lessonId)) {
     thread.addLabel(labels.duplicate);
-    message.createDraftReply('', { htmlBody: withQuotedOriginal(buildDuplicateResponseHtml(), message), name: 'Zahid Naeem (LQM)' }).send();
+    message.createDraftReply('', { htmlBody: withQuotedOriginal(buildDuplicateResponseHtml(student.studentId, lessonId), message), name: 'Zahid Naeem (LQM)' }).send();
     Logger.log(
       `Duplicate submission from student ${student.studentId} for lesson ${lessonId}. ` +
       `Labelled "${LABEL_DUPLICATE}", draft reply created.`
@@ -562,18 +562,18 @@ function buildNoPdfResponseHtml() {
 </html>`;
 }
 
-function buildDuplicateResponseHtml() {
+function buildDuplicateResponseHtml(studentId, lessonId) {
   return `<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"></head>
 <body style="font-family:Arial,sans-serif;font-size:14px;line-height:1.7;color:#222;max-width:680px;">
 
-<p>We received your homework submission, but it was declined because it is a duplicate of one you already sent.</p>
+<p>We received your homework submission email for Student ID ${studentId}, Lesson #${lessonId}, but it was declined because it is a duplicate of one you already sent.</p>
 
 <p><strong>What this means for you:</strong></p>
 <ul style="line-height:1.9;">
   <li>Your original submission was successfully received and has already been assigned for grading.</li>
-  <li>There is no further action needed on your part.</li>
+  <li>If you meant to submit your homework for a different lesson than what you mentioned in the subject line, please resubmit with the correct lesson number in the subject line and attach the correct PDF to your message.</li>
   <li>To help our system run smoothly, please ensure you only submit each lesson's homework once.</li>
 </ul>
 
