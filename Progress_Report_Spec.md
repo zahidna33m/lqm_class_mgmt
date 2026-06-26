@@ -145,9 +145,15 @@ The script reads every column from `QUIZ_FIRST_COL` (Y) to `getLastColumn()`. An
 | Row | Contents |
 | --- | --- |
 | 2 | Lesson number |
-| 3+ | Student grades |
+| 3 | Submission due date |
+| 4+ | Student grades |
 
-Every column from `HW_FIRST_LESSON_COL` (G) to `getLastColumn()` is included; columns whose row-2 cell is blank are skipped.
+Every column from `HW_FIRST_LESSON_COL` (G) to `getLastColumn()` is evaluated; a column is **included** only if **both** are true:
+
+- Row 2 (lesson number) is non-blank.
+- Row 3 (submission date) is a real `Date` value **strictly before today** (today taken at 00:00 in the script timezone).
+
+This means lessons whose submission date is today or in the future are silently excluded from the report.
 
 ---
 
@@ -164,13 +170,12 @@ Body layout (HTML, max width 700px, Arial 14px):
    - `Student Name:` Arabic name in 28px font (omitted if Arabic name is blank)
    - `Progress Report Date:` `MMMM d, yyyy`
 4. **Section: Attendance** (blue header on grey banner, content indented 24px)
-   - Total Classes Held
-   - Number of Absences
+   - `Attendance:` `attended / total (pct%)`
 5. **Section: Quizzes** (blue header on grey banner, content indented 24px)
-   - Total Quizzes Assigned
-   - Quizzes Attempted (with percentage suffix in brackets, e.g. `2 (66.67%)`)
-   - Quiz Scores table
+   - `Quiz Attempted:` `attempted / assigned (pct%)`
+   - `Quiz Scores:` table
 6. **Section: Homework** (blue header on grey banner, content indented 24px)
+   - `Lesson Homework Submitted:` `submitted / assigned (pct%)`
    - Homework grade table
 7. **Footer** — small grey italic `System generated email.`
 
@@ -192,9 +197,14 @@ Four columns: **Quiz ID**, **Score**, **Score %**, **Class Average**
 
 Two columns: **Lesson No**, **Grade**
 
-- Blank grade → `Not submitted`
-- Grade of `-1` → `Yet to be graded`
-- Otherwise the numeric grade
+| Row type | Lesson No | Grade |
+| --- | --- | --- |
+| Per-lesson (submitted, graded) | Lesson number from row 2 | Numeric grade |
+| Per-lesson (submitted, ungraded) | Lesson number | `Yet to be graded` (raw value `-1`) |
+| Per-lesson (not submitted) | Lesson number | `Not submitted` (raw value blank) |
+| **Overall** (last row, bold, grey) | `Overall` | Average of graded grades, rounded to 2 decimal places (e.g. `8.67`); `—` if no graded lessons |
+
+"Graded" for the Overall row means: the cell is a number AND not `-1`. Blank cells and `-1` are both excluded from the average.
 
 ### 6.4 Percentage formatting
 
@@ -204,6 +214,17 @@ Two columns: **Lesson No**, **Grade**
 - Blank/null → `—`
 
 This means the script is tolerant of either storage convention in the source sheets.
+
+### 6.5 Ratio-line formatting
+
+`buildRatioLine_(numerator, denominator)` is used for the Attendance, Quiz Attempted, and Lesson Homework Submitted lines. Output format:
+
+| Inputs | Output |
+| --- | --- |
+| both numeric, denominator > 0 | `n / d (pct%)` — `pct` to 2 decimals |
+| both numeric, denominator = 0 | `n / d` |
+| one numeric, one non-numeric | `n / d` (string-concatenated) |
+| both non-numeric | `—` |
 
 ---
 
@@ -216,11 +237,10 @@ This means the script is tolerant of either storage convention in the source she
 | `{{student_name_ar}}` | `Progress_Cert!G` (rendered as the "Student Name:" line in 28px; line omitted if blank) |
 | `{{student_id}}` | `Progress_Cert!E` |
 | `{{date_generated}}` | Today, formatted `MMMM d, yyyy` (e.g. `June 26, 2026`) in script timezone |
-| `{{total_classes_held}}` | `Attendance!H2` |
-| `{{absences}}` | `H2 − Hn` (n = student's row) |
-| `{{quizzes_assigned}}` | `Quiz_Aggr!M3` |
-| `{{quizzes_attempted}}` | `Quiz_Aggr!Mn` plus ` (XX.XX%)` suffix (= attempted / assigned × 100, two decimal places) |
+| `{{attendance_line}}` | `Hn / H2 (pct%)` from `Attendance` (n = student's row); rendered via `buildRatioLine_` |
+| `{{quiz_attempted_line}}` | `Mn / M3 (pct%)` from `Quiz_Aggr` (n = student's row); rendered via `buildRatioLine_` |
 | `{{quiz_score_table}}` | See §6.2 |
+| `{{hw_submitted_line}}` | `submittedCount / totalLessonsAssigned (pct%)`; submitted = lessons with any value other than blank/null (includes `-1` "Yet to be graded") |
 | `{{homework_grade_table}}` | See §6.3 |
 
 ---
@@ -234,12 +254,13 @@ For each row from `dataFirstRow` to `lastRow`:
 3. If Effective Email is blank → log `ERROR: Student ID NNNN (Name) has no Effective Email. Skipping.` and skip the row (Prog R. Include stays checked).
 4. Compute title from Gender (`Sr.` if gender starts with `f`/`F`, else `Br.`).
 5. Look up the student's record in `quizData.byStudentId`, `attendanceData.byStudentId`, and `hwData.byStudentId` (by Student ID). Each lookup may return undefined; tables handle missing data gracefully.
-6. Compute absences (or `—` if non-numeric).
-7. Compute the quizzes-attempted percentage suffix.
-8. Build the Quiz Scores table and Homework table.
-9. Build the HTML body and either `createDraft` or `sendEmail`.
-10. Write today's `Date` to **Prog R. Sent** (col S).
-11. Set **Prog R. Include** (col R) to `false`.
+6. Build the Attendance ratio line via `buildRatioLine_(attended, totalClasses)`.
+7. Build the Quiz Attempted ratio line via `buildRatioLine_(attempted, assigned)`.
+8. Count lessons with any non-blank grade (including `-1`) and build the HW Submitted ratio line via `buildRatioLine_(submitted, totalLessons)`.
+9. Build the Quiz Scores table and Homework grade table.
+10. Build the HTML body and either `createDraft` or `sendEmail`.
+11. Write today's `Date` to **Prog R. Sent** (col S).
+12. Set **Prog R. Include** (col R) to `false`.
 
 At end of run: log `Done. N report(s) drafted.` (or `sent`).
 
@@ -264,10 +285,14 @@ The send function is intentionally not menued — it should only be wired up aft
 | Student ID not found in Quiz/Attendance/HW sheet | Report still generated; tables show `Not attempted` / `Not submitted` / `—` accordingly. |
 | Quiz with blank student cell | Renders as `Not attempted` with `—` percent. |
 | Quiz with no class average in row 5 | Renders as `—`. |
-| Homework grade of `-1` | Renders as `Yet to be graded`. |
-| Homework grade blank | Renders as `Not submitted`. |
+| Homework grade of `-1` | Renders as `Yet to be graded`; excluded from Overall average. |
+| Homework grade blank | Renders as `Not submitted`; excluded from Overall average. |
+| HW lesson column with no submission date in row 3, or a date today/future | Column excluded from the run entirely (not shown in summary line, not shown in table). |
+| Student has zero graded HW lessons | Homework Overall row shows `—`. |
 | Class avg / score-% cells stored either as decimal `0.83` or whole-number `83` | Both render as `83%`. |
-| `Quiz_Aggr!M3` or `H2` non-numeric | Displayed verbatim; absences computation falls back to `—`. |
+| Either side of a ratio line (Attendance / Quiz Attempted / HW Submitted) is non-numeric | The numbers are still printed but the `(pct%)` suffix is omitted. |
+| Both sides non-numeric | Line renders as `—`. |
+| Denominator is 0 (no classes/quizzes/lessons yet) | The numbers are printed but the `(pct%)` suffix is omitted. |
 
 ---
 

@@ -160,24 +160,29 @@ function processProgressReports_(asDraft) {
 
     const totalClasses    = attendanceData.totalClasses;
     const attendedClasses = studentAtt ? studentAtt.attended : '';
-    const absences = (typeof totalClasses === 'number' && typeof attendedClasses === 'number')
-      ? totalClasses - attendedClasses
-      : '—';
+    const attendanceLine  = buildRatioLine_(attendedClasses, totalClasses);
 
     const quizzesAssigned  = quizData.totalAssigned;
     const quizzesAttempted = studentQuiz ? studentQuiz.taken : 0;
-    const attemptedPctSuffix =
-      (typeof quizzesAttempted === 'number' && typeof quizzesAssigned === 'number' && quizzesAssigned > 0)
-        ? ` (${(quizzesAttempted / quizzesAssigned * 100).toFixed(2)}%)`
-        : '';
+    const quizAttemptedLine = buildRatioLine_(quizzesAttempted, quizzesAssigned);
+
+    const totalLessonsAssigned = hwData.lessons.length;
+    let submittedCount = 0;
+    if (studentHw) {
+      for (const l of hwData.lessons) {
+        const g = studentHw.perLesson[l.no];
+        if (!(g === '' || g === null || g === undefined)) submittedCount++;
+      }
+    }
+    const hwSubmittedLine = buildRatioLine_(submittedCount, totalLessonsAssigned);
 
     const quizScoreTable = buildQuizScoreTable_(studentQuiz, quizData);
     const hwGradeTable   = buildHomeworkGradeTable_(studentHw, hwData);
 
     const htmlBody = buildProgressReportHtml_({
       title, studentName, arabicName, studentId, todayFmt,
-      totalClasses, absences, quizzesAssigned, quizzesAttempted, attemptedPctSuffix,
-      quizScoreTable, hwGradeTable,
+      attendanceLine, quizAttemptedLine, quizScoreTable,
+      hwSubmittedLine, hwGradeTable,
     });
 
     if (asDraft) {
@@ -285,11 +290,18 @@ function loadHwData_() {
   const lastCol = tab.getLastColumn();
   const allData = tab.getRange(1, 1, lastRow, lastCol).getValues();
 
-  // Lesson numbers from row 2, col G onwards
+  // Today at midnight — used to keep only lessons whose submission date is strictly before today.
+  const todayMidnight = new Date();
+  todayMidnight.setHours(0, 0, 0, 0);
+
+  // Lesson numbers from row 2, submission dates from row 3, col G onwards.
+  // Include only columns where row 3 is a Date strictly before todayMidnight.
   const lessons = [];
   for (let col = HW_FIRST_LESSON_COL - 1; col < lastCol; col++) {
-    const lessonNo = allData[1][col];
+    const lessonNo       = allData[1][col]; // row 2
+    const submissionDate = allData[2][col]; // row 3
     if (lessonNo === '' || lessonNo === null) continue;
+    if (!(submissionDate instanceof Date) || submissionDate >= todayMidnight) continue;
     lessons.push({ no: lessonNo, colIndex: col });
   }
 
@@ -356,6 +368,23 @@ function buildHomeworkGradeTable_(studentHw, hwData) {
     return tableRow_([l.no, display]);
   });
 
+  // Overall row — average of graded lessons (numeric grade, excluding -1 "Yet to be graded")
+  const gradedGrades = [];
+  if (studentHw) {
+    for (const l of hwData.lessons) {
+      const g = studentHw.perLesson[l.no];
+      if (typeof g === 'number' && g !== -1) gradedGrades.push(g);
+    }
+  }
+  const overallGrade = gradedGrades.length > 0
+    ? (gradedGrades.reduce((a, b) => a + b, 0) / gradedGrades.length).toFixed(2)
+    : '—';
+
+  rows.push(`<tr style="background:#f7f7f7;font-weight:bold;">
+        <td style="padding:6px 14px;text-align:center;border-top:2px solid #999;">Overall</td>
+        <td style="padding:6px 14px;text-align:center;border-top:2px solid #999;">${overallGrade}</td>
+      </tr>`);
+
   return wrapTable_(['Lesson No', 'Grade'], rows);
 }
 
@@ -394,12 +423,29 @@ function formatNum_(v) {
   return v;
 }
 
+/**
+ * Formats a "numerator / denominator (percent%)" line. Falls back gracefully
+ * when either value is non-numeric or when the denominator is 0.
+ *   buildRatioLine_(2, 3)   → "2 / 3 (66.67%)"
+ *   buildRatioLine_(5, 0)   → "5 / 0"
+ *   buildRatioLine_('', 10) → "—"
+ */
+function buildRatioLine_(numerator, denominator) {
+  const numIsNum = typeof numerator   === 'number';
+  const denIsNum = typeof denominator === 'number';
+  if (!numIsNum && !denIsNum) return '—';
+  if (!numIsNum || !denIsNum) return `${numerator} / ${denominator}`;
+  if (denominator <= 0)       return `${numerator} / ${denominator}`;
+  const pct = (numerator / denominator * 100).toFixed(2);
+  return `${numerator} / ${denominator} (${pct}%)`;
+}
+
 // ─── Email Builder ─────────────────────────────────────────────────────────────
 
 function buildProgressReportHtml_({
   title, studentName, arabicName, studentId, todayFmt,
-  totalClasses, absences, quizzesAssigned, quizzesAttempted, attemptedPctSuffix,
-  quizScoreTable, hwGradeTable,
+  attendanceLine, quizAttemptedLine, quizScoreTable,
+  hwSubmittedLine, hwGradeTable,
 }) {
   const sectionHeaderStyle = 'font-size:20px;color:#1565c0;background:#eeeeee;padding:8px 14px;margin-top:28px;margin-bottom:8px;';
   const sectionBodyStyle   = 'margin-left:24px;';
@@ -424,24 +470,19 @@ function buildProgressReportHtml_({
 
 <h3 style="${sectionHeaderStyle}">Attendance</h3>
 <div style="${sectionBodyStyle}">
-  <p>
-    <strong>Total Classes Held:</strong> ${totalClasses}<br>
-    <strong>Number of Absences:</strong> ${absences}
-  </p>
+  <p><strong>Attendance:</strong> ${attendanceLine}</p>
 </div>
 
 <h3 style="${sectionHeaderStyle}">Quizzes</h3>
 <div style="${sectionBodyStyle}">
-  <p>
-    <strong>Total Quizzes Assigned:</strong> ${quizzesAssigned}<br>
-    <strong>Quizzes Attempted:</strong> ${quizzesAttempted}${attemptedPctSuffix}
-  </p>
+  <p><strong>Quiz Attempted:</strong> ${quizAttemptedLine}</p>
   <p><strong>Quiz Scores:</strong></p>
   ${quizScoreTable}
 </div>
 
 <h3 style="${sectionHeaderStyle}">Homework</h3>
 <div style="${sectionBodyStyle}">
+  <p><strong>Lesson Homework Submitted:</strong> ${hwSubmittedLine}</p>
   ${hwGradeTable}
 </div>
 
