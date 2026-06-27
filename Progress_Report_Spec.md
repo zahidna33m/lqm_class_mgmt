@@ -40,7 +40,7 @@ All defined at the top of the script.
 | `QUIZ_TAB` | `Quiz_Aggr` | Tab in the Quiz spreadsheet |
 | `ATTENDANCE_TAB` | `Attendance` | Tab in the Attendance spreadsheet |
 | `HW_TAB` | `Student_HW_Grades` | Tab in the HW spreadsheet |
-| `SUBJECT` | `LQM Al-Falah 26 Student Progress Report` | Email subject line |
+| `SUBJECT` | `LQM Al-Falah 26 Student Progress Report - Level 1` | Email subject line |
 | `PC_INCLUDE_COL` | 18 (R) | Prog R. Include column |
 | `PC_SENT_COL` | 19 (S) | Prog R. Sent column |
 | `PC_HEADER_ANCHOR` | `Student ID` | Text that identifies the header row |
@@ -80,16 +80,28 @@ This means the layout can shift up or down freely; only the anchor text in colum
 | G | Arabic Name | "Student Name" line in the info block (28px font) |
 | H | (blank) | — |
 | I | (blank) | — |
-| J | Quiz Attempted % | — |
-| K | Quiz Score % | — |
+| J | Quiz Attempted % | Per-student column unused; **J2** is the Quiz Attempted % cert. threshold |
+| K | Quiz Score % | Per-student column unused; **K2** is the overall Quiz Score % cert. threshold |
 | L | Recent Att % | — |
-| M | Book 1 Att % | — |
+| M | Book 1 Att % | Per-student column unused; **M2** is the Attendance % cert. threshold |
 | N | Lessons Submitted | — |
-| O | Lesson Submitted % | — |
-| P | Avg. Grade | — |
+| O | Lesson Submitted % | Per-student column unused; **O2** is the Lesson Homework Submitted % cert. threshold |
+| P | Avg. Grade | Per-student column unused; **P2** is the Overall HW Grade cert. threshold |
 | Q | (blank) | — |
 | R | **Prog R. Include** | Checkbox — script processes only checked rows; unchecks after delivery |
 | S | **Prog R. Sent** | Script writes today's date here after delivery |
+
+#### Row 2 — Certificate Eligibility Thresholds
+
+| Cell | Threshold |
+| --- | --- |
+| `J2` | Quiz Attempted % minimum |
+| `K2` | Overall Quiz Score % minimum |
+| `M2` | Attendance % minimum |
+| `O2` | Lesson Homework Submitted % minimum |
+| `P2` | Overall HW Grade minimum |
+
+These thresholds are pulled once per run and shown in the email under each corresponding student metric. They may be tweaked as the level progresses without any code change.
 
 ### 5.2 Quiz spreadsheet — `Quiz_Aggr`
 
@@ -159,7 +171,7 @@ This means lessons whose submission date is today or in the future are silently 
 
 ## 6. Email Template
 
-Subject: **`LQM Al-Falah 26 Student Progress Report`**
+Subject: **`LQM Al-Falah 26 Student Progress Report - Level 1`**
 
 Body layout (HTML, max width 700px, Arial 14px):
 
@@ -168,16 +180,26 @@ Body layout (HTML, max width 700px, Arial 14px):
 3. **Info block** (light grey background, left blue border):
    - `Student ID:` value
    - `Student Name:` Arabic name in 28px font (omitted if Arabic name is blank)
-   - `Progress Report Date:` `MMMM d, yyyy`
+   - `Report Date:` `MMMM d, yyyy`
 4. **Section: Attendance** (blue header on grey banner, content indented 24px)
    - `Attendance:` `attended / total (pct%)`
+   - `Certificate Eligibility:*` `M2` (formatted as percent)
 5. **Section: Quizzes** (blue header on grey banner, content indented 24px)
    - `Quiz Attempted:` `attempted / assigned (pct%)`
+   - `Certificate Eligibility:*` `J2` (formatted as percent)
    - `Quiz Scores:` table
-6. **Section: Homework** (blue header on grey banner, content indented 24px)
+   - `Certificate Eligibility:*` `K2` (formatted as percent — applies to the table's Overall Score %)
+6. **Section: Homework**`**` (blue header on grey banner with a small `**` superscript marker, content indented 24px)
    - `Lesson Homework Submitted:` `submitted / assigned (pct%)`
+   - `Certificate Eligibility:*` `O2` (formatted as percent)
    - Homework grade table
-7. **Footer** — small grey italic `System generated email.`
+   - `Certificate Eligibility:*` `P2` (raw numeric grade — applies to the table's Overall grade)
+7. **Footnotes** — small italic grey:
+   - `* Certificate Eligibility values might be adjusted as we get closer to the end of this level.`
+   - `** Lessons whose submission date is in future are not included in this list.`
+8. **Footer** — small grey italic `System generated email.`
+
+All five **Certificate Eligibility** lines render in a smaller (13px), italic, muted grey (`#555`) style to distinguish supplementary info from the student's own metrics.
 
 ### 6.1 Section header styling
 
@@ -242,10 +264,17 @@ This means the script is tolerant of either storage convention in the source she
 | `{{quiz_score_table}}` | See §6.2 |
 | `{{hw_submitted_line}}` | `submittedCount / totalLessonsAssigned (pct%)`; submitted = lessons with any value other than blank/null (includes `-1` "Yet to be graded") |
 | `{{homework_grade_table}}` | See §6.3 |
+| `{{cert_eligibility_attendance}}` | `Progress_Cert!M2`, formatted as percent |
+| `{{cert_eligibility_quiz_attempted}}` | `Progress_Cert!J2`, formatted as percent |
+| `{{cert_eligibility_quiz_score}}` | `Progress_Cert!K2`, formatted as percent |
+| `{{cert_eligibility_hw_submitted}}` | `Progress_Cert!O2`, formatted as percent |
+| `{{cert_eligibility_hw_grade}}` | `Progress_Cert!P2`, raw numeric grade |
 
 ---
 
 ## 8. Per-Row Processing Logic
+
+Before the per-row loop, the script reads **row 2** of `Progress_Cert` once and extracts the five certificate-eligibility thresholds from cells `J2`, `K2`, `M2`, `O2`, and `P2`. These are reused for every student in the run.
 
 For each row from `dataFirstRow` to `lastRow`:
 
@@ -289,6 +318,7 @@ The send function is intentionally not menued — it should only be wired up aft
 | Homework grade blank | Renders as `Not submitted`; excluded from Overall average. |
 | HW lesson column with no submission date in row 3, or a date today/future | Column excluded from the run entirely (not shown in summary line, not shown in table). |
 | Student has zero graded HW lessons | Homework Overall row shows `—`. |
+| Any threshold cell (J2/K2/M2/O2/P2) is blank | The corresponding Certificate Eligibility line renders as `—` (via `formatPct_` / `formatNum_`). |
 | Class avg / score-% cells stored either as decimal `0.83` or whole-number `83` | Both render as `83%`. |
 | Either side of a ratio line (Attendance / Quiz Attempted / HW Submitted) is non-numeric | The numbers are still printed but the `(pct%)` suffix is omitted. |
 | Both sides non-numeric | Line renders as `—`. |

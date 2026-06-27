@@ -61,7 +61,7 @@ const QUIZ_TAB        = 'Quiz_Aggr';
 const ATTENDANCE_TAB  = 'Attendance';
 const HW_TAB          = 'Student_HW_Grades';
 
-const SUBJECT = 'LQM Al-Falah 26 Student Progress Report';
+const SUBJECT = 'LQM Al-Falah 26 Student Progress Report - Level 1';
 
 // Progress_Cert column numbers (1-indexed)
 const PC_INCLUDE_COL      = 18; // R
@@ -126,6 +126,16 @@ function processProgressReports_(asDraft) {
     .getRange(dataFirstRow, 1, lastRow - dataFirstRow + 1, PC_SENT_COL)
     .getValues();
 
+  // Certificate-eligibility thresholds — row 2 of Progress_Cert
+  const thresholdRow = progressTab.getRange(2, 1, 1, PC_SENT_COL).getValues()[0];
+  const thresholds = {
+    attendancePct:    thresholdRow[12], // M2
+    quizAttemptedPct: thresholdRow[9],  // J2
+    quizScorePct:     thresholdRow[10], // K2
+    hwSubmittedPct:   thresholdRow[14], // O2
+    hwAvgGrade:       thresholdRow[15], // P2
+  };
+
   // Load supporting sheets once
   const quizData       = loadQuizData_();
   const attendanceData = loadAttendanceData_();
@@ -182,7 +192,7 @@ function processProgressReports_(asDraft) {
     const htmlBody = buildProgressReportHtml_({
       title, studentName, arabicName, studentId, todayFmt,
       attendanceLine, quizAttemptedLine, quizScoreTable,
-      hwSubmittedLine, hwGradeTable,
+      hwSubmittedLine, hwGradeTable, thresholds,
     });
 
     if (asDraft) {
@@ -445,14 +455,20 @@ function buildRatioLine_(numerator, denominator) {
 function buildProgressReportHtml_({
   title, studentName, arabicName, studentId, todayFmt,
   attendanceLine, quizAttemptedLine, quizScoreTable,
-  hwSubmittedLine, hwGradeTable,
+  hwSubmittedLine, hwGradeTable, thresholds,
 }) {
   const sectionHeaderStyle = 'font-size:20px;color:#1565c0;background:#eeeeee;padding:8px 14px;margin-top:28px;margin-bottom:8px;';
   const sectionBodyStyle   = 'margin-left:24px;';
+  const eligibilityStyle   = 'color:#555;font-style:italic;font-size:13px;';
 
   const studentNameLine = arabicName
     ? `<strong>Student Name:</strong> <span style="font-size:28px;vertical-align:middle;">${arabicName}</span><br>`
     : '';
+
+  const eligibility = (value, asPct) => {
+    const formatted = asPct ? formatPct_(value) : formatNum_(value);
+    return `<span style="${eligibilityStyle}">Certificate Eligibility:* ${formatted}</span>`;
+  };
 
   return `<!DOCTYPE html>
 <html>
@@ -465,28 +481,44 @@ function buildProgressReportHtml_({
 
 <p style="background:#f7f7f7;padding:10px 14px;border-left:4px solid #888;">
   <strong>Student ID:</strong> ${studentId}<br>
-  ${studentNameLine}<strong>Progress Report Date:</strong> ${todayFmt}
+  ${studentNameLine}<strong>Report Date:</strong> ${todayFmt}
 </p>
 
 <h3 style="${sectionHeaderStyle}">Attendance</h3>
 <div style="${sectionBodyStyle}">
-  <p><strong>Attendance:</strong> ${attendanceLine}</p>
+  <p>
+    <strong>Attendance:</strong> ${attendanceLine}<br>
+    ${eligibility(thresholds.attendancePct, true)}
+  </p>
 </div>
 
 <h3 style="${sectionHeaderStyle}">Quizzes</h3>
 <div style="${sectionBodyStyle}">
-  <p><strong>Quiz Attempted:</strong> ${quizAttemptedLine}</p>
+  <p>
+    <strong>Quiz Attempted:</strong> ${quizAttemptedLine}<br>
+    ${eligibility(thresholds.quizAttemptedPct, true)}
+  </p>
   <p><strong>Quiz Scores:</strong></p>
   ${quizScoreTable}
+  <p style="margin-top:6px;">${eligibility(thresholds.quizScorePct, true)}</p>
 </div>
 
-<h3 style="${sectionHeaderStyle}">Homework</h3>
+<h3 style="${sectionHeaderStyle}">Homework<span style="font-size:13px;vertical-align:super;">**</span></h3>
 <div style="${sectionBodyStyle}">
-  <p><strong>Lesson Homework Submitted:</strong> ${hwSubmittedLine}</p>
+  <p>
+    <strong>Lesson Homework Submitted:</strong> ${hwSubmittedLine}<br>
+    ${eligibility(thresholds.hwSubmittedPct, true)}
+  </p>
   ${hwGradeTable}
+  <p style="margin-top:6px;">${eligibility(thresholds.hwAvgGrade, false)}</p>
 </div>
 
-<p style="margin-top:32px;color:#888;font-size:12px;"><em>System generated email.</em></p>
+<p style="margin-top:24px;color:#555;font-size:12px;">
+  <em>* Certificate Eligibility values might be adjusted as we get closer to the end of this level.</em><br>
+  <em>** Lessons whose submission date is in future are not included in this list.</em>
+</p>
+
+<p style="margin-top:8px;color:#888;font-size:12px;"><em>System generated email.</em></p>
 
 </body>
 </html>`;
