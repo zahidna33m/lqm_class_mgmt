@@ -77,12 +77,22 @@ const QUIZ_DATA_FIRST_ROW = 8; // first student row
 // HW Student_HW_Grades layout
 const HW_FIRST_LESSON_COL = 7; // G
 
+// Total homework-bearing lessons in the level — drives the report-stage selector.
+// Lessons 1–3 have no homework, so HW submissions are expected for lessons 4–23 (20 total).
+// Stage thresholds (HW lessons released / LEVEL_TOTAL_HW_LESSONS):
+//   early  : pct  < 0.50      (≤ 9 HW released → roughly through lesson 12)
+//   mid    : pct  < 0.75      (10–14 HW released → roughly lessons 13–17)
+//   late   : pct  < 1.00      (15–19 HW released → roughly lessons 18–22)
+//   final  : pct == 1.00      (all 20 HW released, i.e. lesson 23 — assumes grading is complete)
+const LEVEL_TOTAL_HW_LESSONS = 20;
+
 // ─── Menu ──────────────────────────────────────────────────────────────────────
 
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('LQM Progress')
     .addItem('Create Progress Report Drafts', 'createProgressReportDrafts')
+    .addItem('Send Progress Report Emails',  'sendProgressReportEmails')
     .addToUi();
 }
 
@@ -141,6 +151,13 @@ function processProgressReports_(asDraft) {
   const attendanceData = loadAttendanceData_();
   const hwData         = loadHwData_();
 
+  // Pick the encouraging intro paragraphs based on how far the level has progressed.
+  // The 'final' stage fires only when all lessons are released; it assumes the operator
+  // has confirmed all homework has been graded before running.
+  const reportStage    = pickReportStage_(hwData.lessons.length);
+  const stageIntroHtml = buildStageIntroHtml_(reportStage);
+  Logger.log(`Report stage: ${reportStage} (${hwData.lessons.length} of ${LEVEL_TOTAL_HW_LESSONS} HW lessons released).`);
+
   const today    = new Date();
   const todayFmt = Utilities.formatDate(today, Session.getScriptTimeZone(), 'MMMM d, yyyy');
 
@@ -191,6 +208,7 @@ function processProgressReports_(asDraft) {
 
     const htmlBody = buildProgressReportHtml_({
       title, studentName, arabicName, studentId, todayFmt,
+      stageIntroHtml,
       attendanceLine, quizAttemptedLine, quizScoreTable,
       hwSubmittedLine, hwGradeTable, thresholds,
     });
@@ -228,6 +246,46 @@ function findHeaderRow_(tab) {
     if (String(values[i][0] || '').trim() === PC_HEADER_ANCHOR) return i + 1;
   }
   return null;
+}
+
+// ─── Report Stage ──────────────────────────────────────────────────────────────
+
+/**
+ * Returns one of 'early' | 'mid' | 'late' | 'final' based on how many lessons
+ * have been released so far (i.e. whose submission date has already passed).
+ *   pct  < 0.50  → early
+ *   pct  < 0.75  → mid
+ *   pct  < 1.00  → late
+ *   pct == 1.00  → final
+ * 'final' assumes the operator has verified all homework grading is complete.
+ */
+function pickReportStage_(lessonsReleased) {
+  if (lessonsReleased >= LEVEL_TOTAL_HW_LESSONS) return 'final';
+  const pct = lessonsReleased / LEVEL_TOTAL_HW_LESSONS;
+  if (pct < 0.50) return 'early';
+  if (pct < 0.75) return 'mid';
+  return 'late';
+}
+
+/**
+ * Returns the stage-specific intro HTML (one or two short paragraphs) that
+ * sits between the greeting and the info block. The 'final' stage omits the
+ * second paragraph because the first paragraph already closes the message.
+ */
+function buildStageIntroHtml_(stage) {
+  const earlyP = `<p>Before you look at the numbers, a quick note. This is an <strong>early progress report</strong>. We've only covered a small portion of the lessons and quizzes for this level so far, so if any of your figures are below the Certificate Eligibility values, please don't worry about it. There's plenty of time over the coming weeks to bring them up, إن شاء الله. And if you're already at or above the thresholds, keep it up!</p>`;
+  const midP   = `<p>Before you look at the numbers, a quick note. We're now around the <strong>midpoint of the level</strong>, with a good number of lessons and quizzes still ahead. If some of your figures are below the Certificate Eligibility values, there's still time to bring them up with steady effort over the coming weeks, إن شاء الله. And if you're already at or above the thresholds, keep it up!</p>`;
+  const lateP  = `<p>Before you look at the numbers, a quick note. We're now in the <strong>final stretch of the level</strong>, with only a few lessons and quizzes left. If some of your figures are below the Certificate Eligibility values, there's still time to push toward them. Even a focused effort over these last weeks can shift things, إن شاء الله. And if you're already at or above the thresholds, keep it up!</p>`;
+  const finalP = `<p>A quick note before you check the numbers. This is your <strong>final progress report for the level</strong>. The figures below reflect your effort across the whole term, and Certificate Eligibility is being assessed against them. Whether you've met every threshold or not, the time you've spent learning the Qur'an is itself the most important part of this journey. Once this level wraps up, we'll start Level 2, which will be a fresh opportunity to work toward the next certificate, إن شاء الله.</p>`;
+  const secondP = `<p>And please remember, the certificate is a nice recognition but it isn't the main point of this journey. What really matters is the connection you're building with the Qur'an. As long as you're putting in the effort and learning, you're on the right path.</p>`;
+
+  switch (stage) {
+    case 'early': return earlyP + secondP;
+    case 'mid':   return midP   + secondP;
+    case 'late':  return lateP  + secondP;
+    case 'final': return finalP;
+  }
+  return '';
 }
 
 // ─── External Sheet Loaders ────────────────────────────────────────────────────
@@ -454,6 +512,7 @@ function buildRatioLine_(numerator, denominator) {
 
 function buildProgressReportHtml_({
   title, studentName, arabicName, studentId, todayFmt,
+  stageIntroHtml,
   attendanceLine, quizAttemptedLine, quizScoreTable,
   hwSubmittedLine, hwGradeTable, thresholds,
 }) {
@@ -477,7 +536,7 @@ function buildProgressReportHtml_({
 
 <p>Assalaamu alaykum ${title} ${studentName},</p>
 
-<p>Here's your progress report for the Al-Falah 26 Quranic Arabic class.</p>
+${stageIntroHtml}
 
 <p style="background:#f7f7f7;padding:10px 14px;border-left:4px solid #888;">
   <strong>Student ID:</strong> ${studentId}<br>

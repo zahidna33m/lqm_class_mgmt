@@ -22,7 +22,7 @@ After delivery, the script writes today's date to **Prog R. Sent** and unchecks 
 | Function | Purpose | Wired to |
 | --- | --- | --- |
 | `createProgressReportDrafts()` | Saves Gmail drafts (no send) | Custom menu **LQM Progress → Create Progress Report Drafts** |
-| `sendProgressReportEmails()`   | Sends emails directly | Not menued; reserved for when drafts are verified |
+| `sendProgressReportEmails()`   | Sends emails directly | Custom menu **LQM Progress → Send Progress Report Emails** |
 | `processProgressReports_(asDraft)` | Shared core logic | Both of the above |
 
 ---
@@ -49,6 +49,7 @@ All defined at the top of the script.
 | `QUIZ_FIRST_COL` | 25 (Y) | First quiz column in `Quiz_Aggr` |
 | `QUIZ_DATA_FIRST_ROW` | 8 | First student row in `Quiz_Aggr` |
 | `HW_FIRST_LESSON_COL` | 7 (G) | First lesson column in `Student_HW_Grades` |
+| `LEVEL_TOTAL_HW_LESSONS` | 20 | Total HW-bearing lessons in the level (lessons 4–23; lessons 1–3 have no homework). Drives the encouraging-intro stage selector. |
 
 ---
 
@@ -176,7 +177,7 @@ Subject: **`LQM Al-Falah 26 Student Progress Report - Level 1`**
 Body layout (HTML, max width 700px, Arial 14px):
 
 1. **Greeting** — `Assalaamu alaykum {{title}} {{student_name_en}},`
-2. **Intro line** — boilerplate sentence.
+2. **Stage intro** — one or two short paragraphs of encouraging context (see §6.6); chosen automatically by `pickReportStage_` based on how far the level has progressed.
 3. **Info block** (light grey background, left blue border):
    - `Student ID:` value
    - `Student Name:` Arabic name in 28px font (omitted if Arabic name is blank)
@@ -237,7 +238,26 @@ Two columns: **Lesson No**, **Grade**
 
 This means the script is tolerant of either storage convention in the source sheets.
 
-### 6.5 Ratio-line formatting
+### 6.5 Stage intro (encouraging text)
+
+A short, tone-setting block sits immediately after the greeting. It is chosen automatically based on how many homework-bearing lessons have been released so far (i.e. `hwData.lessons.length`, which already excludes lessons whose submission date is today or later) versus `LEVEL_TOTAL_HW_LESSONS` (20 — lessons 4–23).
+
+| Stage | Condition (`released / 20`) | HW released | Lesson window | Planned send |
+| --- | --- | --- | --- | --- |
+| `early` | `< 0.50` | 0–9 | lessons 4–12 | After lesson 8 (5 HW released) |
+| `mid`   | `< 0.75` | 10–14 | lessons 13–17 | After lesson 13 (10 HW released); flexible — any send through lesson 17 also lands here |
+| `late`  | `< 1.00` | 15–19 | lessons 18–22 | After lesson 19 (16 HW released) |
+| `final` | `= 1.00` | 20 | lesson 23 | After lesson 23 — **assumes operator has verified all grading is complete** before running |
+
+Each stage contributes one short paragraph tailored to where the level is at. The paragraph uses a conditional framing: it reassures students whose numbers are below the Certificate Eligibility thresholds, and encourages students whose numbers are already at or above them. The `final` paragraph additionally mentions that Level 2 will begin after this level wraps up — a fresh opportunity for any student who didn't qualify this time.
+
+For `early`, `mid`, and `late`, a second timeless paragraph also appears, reminding the student that the certificate is a recognition rather than the main point of the journey, and that what matters is the connection they're building with the Qur'an. The `final` stage omits this second paragraph because its first paragraph already lands on that note.
+
+The exact wording lives in `buildStageIntroHtml_`. Update there to change copy.
+
+The chosen stage is logged at run time (`Report stage: X (N of Y lessons released).`).
+
+### 6.6 Ratio-line formatting
 
 `buildRatioLine_(numerator, denominator)` is used for the Attendance, Quiz Attempted, and Lesson Homework Submitted lines. Output format:
 
@@ -259,6 +279,7 @@ This means the script is tolerant of either storage convention in the source she
 | `{{student_name_ar}}` | `Progress_Cert!G` (rendered as the "Student Name:" line in 28px; line omitted if blank) |
 | `{{student_id}}` | `Progress_Cert!E` |
 | `{{date_generated}}` | Today, formatted `MMMM d, yyyy` (e.g. `June 26, 2026`) in script timezone |
+| `{{stage_intro_html}}` | One or two short paragraphs from `buildStageIntroHtml_(stage)`. Stage is `pickReportStage_(hwData.lessons.length)` compared against `LEVEL_TOTAL_HW_LESSONS`. See §6.5. |
 | `{{attendance_line}}` | `Hn / H2 (pct%)` from `Attendance` (n = student's row); rendered via `buildRatioLine_` |
 | `{{quiz_attempted_line}}` | `Mn / M3 (pct%)` from `Quiz_Aggr` (n = student's row); rendered via `buildRatioLine_` |
 | `{{quiz_score_table}}` | See §6.2 |
@@ -274,7 +295,7 @@ This means the script is tolerant of either storage convention in the source she
 
 ## 8. Per-Row Processing Logic
 
-Before the per-row loop, the script reads **row 2** of `Progress_Cert` once and extracts the five certificate-eligibility thresholds from cells `J2`, `K2`, `M2`, `O2`, and `P2`. These are reused for every student in the run.
+Before the per-row loop, the script reads **row 2** of `Progress_Cert` once and extracts the five certificate-eligibility thresholds from cells `J2`, `K2`, `M2`, `O2`, and `P2`. It also computes the `reportStage` (one of `early` / `mid` / `late` / `final`) from `hwData.lessons.length` versus `LEVEL_TOTAL_HW_LESSONS` and builds the corresponding `stageIntroHtml` once. All three (thresholds, stage, intro) are reused for every student in the run.
 
 For each row from `dataFirstRow` to `lastRow`:
 
@@ -297,11 +318,12 @@ At end of run: log `Done. N report(s) drafted.` (or `sent`).
 
 ## 9. Custom Menu
 
-`onOpen()` adds:
+`onOpen()` adds the **LQM Progress** menu with two items:
 
-- **LQM Progress** → **Create Progress Report Drafts**
+- **Create Progress Report Drafts** — runs `createProgressReportDrafts()` (saves to Gmail Drafts).
+- **Send Progress Report Emails** — runs `sendProgressReportEmails()` (sends immediately, no draft step).
 
-The send function is intentionally not menued — it should only be wired up after drafts have been confirmed accurate.
+Both paths share `processProgressReports_(asDraft)`. The drafts path is the safe default for previewing; the send path is for runs you've already verified.
 
 ---
 
