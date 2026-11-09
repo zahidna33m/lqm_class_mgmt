@@ -6,23 +6,27 @@
  *
  * Two delivery modes:
  *   createGraderStatusDrafts()  — saves to Gmail Drafts for manual review
- *                                 before sending. Available from the menu.
+ *                                 before sending. Run it from the editor.
  *   sendGraderStatusEmails()    — sends directly. Run by the twice-weekly
  *                                 time-based trigger (Tuesday + Friday, 5 pm).
  *
  * Run installGraderStatusTriggers() once from the Apps Script editor to
  * register the automatic schedule. Run createGraderStatusDrafts() from the
- * "LQM Grading" menu to create drafts on demand.
+ * Apps Script editor to create drafts on demand (the "LQM Grading" menu only
+ * appears when this script is attached to a spreadsheet).
  *
- * This script lives in the All HW Submissions spreadsheet's Apps Script
- * project and shares MASTER_SHEET_ID, AGG_SHEET_ID, AGG_TAB_NAME, and
- * AGG_HEADERS with HW_Submission_Aggregator.gs — those are not redeclared here.
+ * This script lives in the same standalone Apps Script project as the
+ * aggregator, and shares MASTER_SHEET_ID, AGG_TAB_NAME, AGG_HEADERS and AGG_COL with
+ * HW_Submission_Aggregator.gs, and loadBooks() with Books_Config.gs — those are
+ * not redeclared here.
  *
  * ── Data sources ─────────────────────────────────────────────────────────────
  *   Aggregated sheet (AGG_TAB_NAME)
- *     Col E  Lesson #
- *     Col G  Grader         (name — matched case-insensitively to Graders tab)
- *     Col H  Grading Status ("Assigned" / "Grading in progress" / "Grading complete")
+ *     Col F  Lesson #
+ *     Col H  Grader         (name — matched case-insensitively to Graders tab)
+ *     Col I  Grading Status ("Assigned" / "Grading in progress" / "Grading complete")
+ *   The report covers one book, REPORT_BOOK, using that book's aggregate from the
+ *   Master sheet's Book_HW tab. When Book 1 grading ends, change REPORT_BOOK to 2.
  *
  *   Master Sheet — Graders tab
  *     Col A  Grader ID
@@ -37,6 +41,9 @@
  *     Col H  Grader 1  (Grader ID)
  *     Col I  Grader 2  (Grader ID)
  */
+
+// Which book's aggregate the report reads. Change this when a new book takes over grading.
+const REPORT_BOOK = 1;
 
 // ─── Menu ──────────────────────────────────────────────────────────────────────
 
@@ -63,7 +70,12 @@ function sendGraderStatusEmails() {
 
 function processGraderStatus_(asDraft) {
   const masterSS = SpreadsheetApp.openById(MASTER_SHEET_ID);
-  const aggTab   = SpreadsheetApp.openById(AGG_SHEET_ID).getSheetByName(AGG_TAB_NAME);
+  const reportBook = loadBooks(masterSS).find(b => b.book === REPORT_BOOK);
+  if (!reportBook || !reportBook.aggSheetId) {
+    Logger.log(`Book ${REPORT_BOOK} has no Aggregate Sheet Link in ${BOOKS_TAB}. Aborting.`);
+    return;
+  }
+  const aggTab   = SpreadsheetApp.openById(reportBook.aggSheetId).getSheetByName(AGG_TAB_NAME);
 
   if (!aggTab) {
     Logger.log(`Tab "${AGG_TAB_NAME}" not found. Aborting.`);
@@ -110,7 +122,7 @@ function processGraderStatus_(asDraft) {
   }
 
   // ── Count grading statuses per grader/lesson from the aggregated sheet ──────
-  // Col E (index 4) = Lesson #, Col G (index 6) = Grader, Col H (index 7) = Grading Status
+  // Positions come from AGG_COL (HW_Submission_Aggregator.gs): Lesson #, Grader, Grading Status.
 
   const lastRow = aggTab.getLastRow();
   if (lastRow < 2) {
@@ -122,9 +134,9 @@ function processGraderStatus_(asDraft) {
   const graderCounts = {}; // grader name → { byLesson: { lessonKey → { assigned, inProgress, complete } } }
 
   for (const row of aggData) {
-    const graderName    = String(row[6] || '').trim();
-    const gradingStatus = String(row[7] || '').trim();
-    const lessonNo      = String(row[4] || '').trim();
+    const graderName    = String(row[AGG_COL.GRADER] || '').trim();
+    const gradingStatus = String(row[AGG_COL.STATUS] || '').trim();
+    const lessonNo      = String(row[AGG_COL.LESSON] || '').trim();
     if (!graderName) continue;
 
     if (!graderCounts[graderName]) graderCounts[graderName] = { byLesson: {} };

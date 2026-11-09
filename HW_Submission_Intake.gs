@@ -10,7 +10,7 @@
  * Apps Script editor to register it.
  *
  * ── Setup (one-time) ──────────────────────────────────────────────────────────
- *   1. Open Google Apps Script (script.google.com) and paste this file.
+ *   1. Open Google Apps Script (script.google.com) and paste this file, plus Books_Config.gs.
  *   2. Set MASTER_SHEET_ID (below) to your master Google Sheet's ID.
  *   3. Run installTrigger() once from the editor to register the hourly job.
  *   4. Authorise Gmail, Drive, and Sheets access when prompted.
@@ -57,12 +57,13 @@
  *     Col B  Timestamp
  *     Col C  Student ID
  *     Col D  Student Name              (email username if student is unrecognised)
- *     Col E  Lesson #
- *     Col F  HW File Link
- *     Col G  Grader
- *     Col H  Grading Status            ("Assigned" for normal groups; "Incorrect submission" for G00)
- *     Col I  Grade                     (filled in by grader)
- *     Col J  Comments                  (filled in by grader)
+ *     Col E  Book                      (decided by resolveBook() from the email's date, never by what the student writes)
+ *     Col F  Lesson #
+ *     Col G  HW File Link
+ *     Col H  Grader
+ *     Col I  Grading Status            ("Assigned" for normal groups; "Incorrect submission" for G00)
+ *     Col J  Grade                     (filled in by grader)
+ *     Col K  Comments                  (filled in by grader)
  *
  * ── Gmail labels ──────────────────────────────────────────────────────────────
  *   HW_Submitted             Processed successfully into the correct group.
@@ -98,8 +99,10 @@
  *                               regardless of label.
  *   extractDriveFolderId()      Pulls the folder ID from a Drive folder URL.
  *   extractSheetId()            Pulls the sheet ID from a Google Sheets URL.
+ *   resolveBook()               (Books_Config.gs) Decides the book from the email's
+ *                               date and the Master sheet's Book_HW tab.
  *   buildFilename()             Builds the saved PDF filename:
- *                               L{nn}_{StudentID}_{originalName}.
+ *                               B{n}_L{nn}_{StudentID}_{originalName}.
  *   buildNoPdfResponseHtml()    HTML body for the "no PDF attached" draft reply.
  *   buildDuplicateResponseHtml() HTML body for the "duplicate submission" draft reply.
  *   buildG00StudentResponseHtml() HTML body for the "student not in a group" draft reply.
@@ -122,6 +125,13 @@ const LABEL_NO_ATTACHMENT = 'HW No Attachment';
 const LABEL_DUPLICATE     = 'HW Duplicate Submission';
 const LABEL_NO_GROUP      = 'HW_No_Group_Assigned';
 const HW_SHEET_TAB        = 'HW_Submissions';
+
+// Testing only: set to a Date to make the book rule treat that as the email's date.
+// Must be null in the live project.
+const CLOCK_OVERRIDE = null;
+
+// 1-based column positions in the HW_Submissions tab (see header comment).
+const SHEET_COL = { BOOK: 5, LESSON: 6, GRADER: 8 };
 
 // ─── Entry Point ───────────────────────────────────────────────────────────────
 
@@ -215,6 +225,9 @@ function processThread(thread, labels, master) {
   // 4. Parse lesson number — broad scan of subject first, then labelled pattern in body.
   const lessonId = extractLessonIdBroad(subject) ?? extractLessonId(body);
 
+  // 4b. Decide the book from the email's date only (Book_HW tab in the Master sheet).
+  const book = resolveBook(CLOCK_OVERRIDE || message.getDate(), master.books);
+
   // 5. Open the Drive folder and the submission sheet.
   const folderId = extractDriveFolderId(group.hwUploadFolderLink);
   const sheetId  = extractSheetId(group.hwSheetLink);
@@ -235,17 +248,29 @@ function processThread(thread, labels, master) {
     return;
   }
 
+  // Safety net: if this group's sheet has not been migrated to the Book layout, writing
+  // a row would misalign every column. Leave the thread unlabelled so the next run
+  // retries it (the search window is 2h), and make the problem visible in the log.
+  const bookHeader = String(sheet.getRange(1, SHEET_COL.BOOK).getValue() || '').trim();
+  if (bookHeader !== 'Book') {
+    Logger.log(
+      `Sheet ${sheetId} (group ${group.groupId}) column E is "${bookHeader}", not "Book". ` +
+      `Not migrated — thread ${thread.getId()} left unlabelled for retry.`
+    );
+    return;
+  }
+
   // 6. Pick a grader for this group using count-based balancing: assign to
   //    whichever grader has fewer existing rows in the sheet. Ties are broken
   //    randomly. This converges to equal distribution regardless of sample size.
   const graderName = resolveGrader(group, master.graders, sheet);
 
   // 7. Reject if this student has already submitted this lesson.
-  if (student && lessonId !== null && isDuplicateSubmission(sheet, student.studentId, lessonId)) {
+  if (student && lessonId !== null && isDuplicateSubmission(sheet, student.studentId, book, lessonId)) {
     thread.addLabel(labels.duplicate);
-    message.createDraftReply('', { htmlBody: withQuotedOriginal(buildDuplicateResponseHtml(student.studentId, lessonId), message), name: 'Zahid Naeem (LQM)' }).send();
+    message.createDraftReply('', { htmlBody: withQuotedOriginal(buildDuplicateResponseHtml(student.studentId, book, lessonId), message), name: 'Zahid Naeem (LQM)' }).send();
     Logger.log(
-      `Duplicate submission from student ${student.studentId} for lesson ${lessonId}. ` +
+      `Duplicate submission from student ${student.studentId} for book ${book} lesson ${lessonId}. ` +
       `Labelled "${LABEL_DUPLICATE}", draft reply created.`
     );
     return;
@@ -256,7 +281,7 @@ function processThread(thread, labels, master) {
     Logger.log(`${pdfs.length} PDFs found from ${from}. Only the first will be saved.`);
   }
   const pdf      = pdfs[0];
-  const filename = buildFilename(lessonId, student ? student.studentId : null, pdf.getName());
+  const filename = buildFilename(book, lessonId, student ? student.studentId : null, pdf.getName());
   const file     = folder.createFile(pdf.copyBlob().setName(filename));
   const studentName = student ? student.studentName : from.split('@')[0];
 
@@ -265,6 +290,7 @@ function processThread(thread, labels, master) {
     new Date(),                                      // Timestamp
     student   ? student.studentId   : '',            // Student ID
     studentName,                                     // Student Name (email username if unknown)
+    book,                                            // Book
     lessonId !== null ? lessonId    : '',             // Lesson #
     file.getUrl(),                                   // HW File Link
     graderName,                                      // Grader
@@ -289,6 +315,10 @@ function processThread(thread, labels, master) {
  */
 function loadMasterData() {
   const ss = SpreadsheetApp.openById(MASTER_SHEET_ID);
+
+  // ── Book_HW tab — throws if missing or invalid, which stops the run with every
+  // thread still unlabelled, so the next run retries instead of guessing a book.
+  const books = loadBooks(ss);
 
   // ── Graders tab ──────────────────────────────────────────────────────────
   // Columns: Grader ID | Name | Email | Phone | Comments
@@ -336,7 +366,7 @@ function loadMasterData() {
     if (studentId) bySid[studentId]   = record;
   }
 
-  return { graders, groups, members: { byEmail, bySid } };
+  return { graders, groups, books, members: { byEmail, bySid } };
 }
 
 // ─── Student Lookups ───────────────────────────────────────────────────────────
@@ -404,10 +434,10 @@ function resolveGrader(group, graders, sheet) {
   const name1 = getName(candidates[0]);
   const name2 = getName(candidates[1]);
 
-  // Read only the last row's grader cell (Col G = column 7, 1-based).
+  // Read only the last row's grader cell.
   const lastRow = sheet.getLastRow();
   if (lastRow > 1) {
-    const lastGrader = String(sheet.getRange(lastRow, 7).getValue() || '').trim();
+    const lastGrader = String(sheet.getRange(lastRow, SHEET_COL.GRADER).getValue() || '').trim();
     if (lastGrader === name1) return name2;
     if (lastGrader === name2) return name1;
   }
@@ -456,7 +486,8 @@ function extractLessonIdBroad(text) {
     const n = parseInt(labeled[1], 10);
     if (n >= 1 && n <= 23) return n;
   }
-  const pattern = /(?<!\d)(\d{1,2})(?!\d)/g;
+  // A number right after the word "book" ("Book 2") is a book number, not a lesson.
+  const pattern = /(?<!book\s*#?\s*)(?<!\d)(\d{1,2})(?!\d)/gi;
   let match;
   while ((match = pattern.exec(text)) !== null) {
     const n = parseInt(match[1], 10);
@@ -505,11 +536,11 @@ function extractSheetId(url) {
 
 /**
  * Builds the filename for a saved PDF.
- * Format: {LessonNo}_{StudentID}_{originalName}
+ * Format: B{n}_L{nn}_{StudentID}_{originalName}
  * Parts with no value are omitted.
  */
-function buildFilename(lessonId, studentId, originalName) {
-  const parts = [];
+function buildFilename(book, lessonId, studentId, originalName) {
+  const parts = ['B' + book];
   if (lessonId  !== null && lessonId  !== undefined) parts.push('L' + String(lessonId).padStart(2, '0'));
   if (studentId !== null && studentId !== undefined) parts.push(String(studentId));
   parts.push(originalName || 'attachment.pdf');
@@ -520,16 +551,22 @@ function buildFilename(lessonId, studentId, originalName) {
 
 /**
  * Returns true if the HW_Submissions sheet already contains a row for the
- * given studentId and lessonId. Only called when both values are known.
+ * given studentId, book and lessonId. Only called when all values are known.
+ * A blank Book in an existing row counts as Book 1.
  */
-function isDuplicateSubmission(sheet, studentId, lessonId) {
+function isDuplicateSubmission(sheet, studentId, book, lessonId) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return false;
-  // Read Student ID (col C) and Lesson # (col E) — columns 3 and 5, width 3.
-  const data = sheet.getRange(2, 3, lastRow - 1, 3).getValues();
+  // Read Student ID (col C) through Lesson # (col F) — columns 3 to 6, width 4.
+  const data = sheet.getRange(2, 3, lastRow - 1, 4).getValues();
   const sid   = String(studentId).trim();
+  const bid   = String(book).trim();
   const lid   = String(lessonId).trim();
-  return data.some(row => String(row[0]).trim() === sid && String(row[2]).trim() === lid);
+  return data.some(row =>
+    String(row[0]).trim() === sid &&
+    (String(row[2]).trim() || '1') === bid &&
+    String(row[3]).trim() === lid
+  );
 }
 
 // ─── Response Templates ────────────────────────────────────────────────────────
@@ -562,13 +599,13 @@ function buildNoPdfResponseHtml() {
 </html>`;
 }
 
-function buildDuplicateResponseHtml(studentId, lessonId) {
+function buildDuplicateResponseHtml(studentId, book, lessonId) {
   return `<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"></head>
 <body style="font-family:Arial,sans-serif;font-size:14px;line-height:1.7;color:#222;max-width:680px;">
 
-<p>We received your homework submission email for Student ID ${studentId}, Lesson #${lessonId}, but it was declined because it is a duplicate of one you already sent.</p>
+<p>We received your homework submission email for Student ID ${studentId}, Book ${book} Lesson #${lessonId}, but it was declined because it is a duplicate of one you already sent.</p>
 
 <p><strong>What this means for you:</strong></p>
 <ul style="line-height:1.9;">
