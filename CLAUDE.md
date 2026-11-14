@@ -15,7 +15,7 @@ The script lives in `HW_Submission_Intake.gs` and is deployed as a standalone Go
 - ~150 students divided into ~20–25 study groups of 6–12 students each.
 - Each group has a shared Google Drive folder and a homework submission Google Sheet inside it.
 - 1–2 graders are assigned per group.
-- All configuration lives in a single **Master Google Sheet** (set via `MASTER_SHEET_ID` in `Code.gs`).
+- All configuration lives in a single **Master Google Sheet** (set via `MASTER_SHEET_ID` in `HW_Submission_Intake.gs` and `HW_Submission_Aggregator.gs`).
 
 ## Master Google Sheet — tabs and columns
 
@@ -53,7 +53,7 @@ Each group folder contains one Google Sheet. It has a single tab named **HW_Subm
 - Grader: the grader's **name** (not ID), randomly selected if both Grader 1 and Grader 2 are set.
 - Grade and Comments: left blank for graders to fill in.
 
-## Script logic (Code.gs)
+## Script logic (HW_Submission_Intake.gs)
 
 1. Search Gmail for emails to the mailing list that have none of the three labels (see below).
 2. **No PDF attached** → apply `HW No Attachment` label, skip. No sheet entry created.
@@ -61,7 +61,7 @@ Each group folder contains one Google Sheet. It has a single tab named **HW_Subm
 4. **Resolve group**: use student's Group ID → look up in Groups tab. If group missing or folder/sheet links are unparseable, fall back to G00.
 5. **Lesson ID**: scan subject + body for patterns like "Lesson 5", "Lesson #5", "Lesson No. 5" (value must be 1–23). Leave blank if not found. Then resolve the Book from the email date (see above); the saved filename is prefixed `B{n}_`.
 6. **Grader**: pick Grader 1 or 2 randomly (if both set); look up name from Graders tab.
-7. **Save PDF**: upload to the group's Drive folder with filename `{LessonNo}_{StudentID}_{originalName}` (skip missing parts).
+7. **Save PDF**: upload to the group's Drive folder with filename `B{n}_L{nn}_{StudentID}_{originalName}` (skip missing parts).
 8. **Multiple PDFs**: only the first PDF is saved and logged; any others are ignored (the log notes it).
 9. **Log submission**: append row to the group's HW_Submission sheet. If the sheet's column E header is not "Book" (not yet migrated), the thread is left unlabelled and retried next run.
 10. **Label the thread**:
@@ -82,11 +82,26 @@ Labels are created automatically by the script on first run if they don't exist.
 
 ## Deployment
 
-1. Go to script.google.com, create a new project, paste `Code.gs`.
-2. Set `MASTER_SHEET_ID` at the top of the file.
-3. Run `installTrigger()` once from the editor to create the hourly trigger.
-4. Authorise Gmail, Drive, and Sheets access when prompted.
-5. Test by running `processHomeworkEmails()` manually and checking View → Logs.
+Two **standalone** Apps Script projects (created at script.google.com, not from inside a spreadsheet), plus per-spreadsheet bound scripts for the communication tools. Each file lives in exactly one project, except `Books_Config.gs`, which is in both. Do not leave backup copies or an old `Code.gs` in a project: a second file declaring the same top-level name (e.g. `MASTER_SHEET_ID`) makes every run fail with `SyntaxError: Identifier ... has already been declared`, and triggers fail silently.
+
+| Project | Files | Triggers |
+|---|---|---|
+| **HW Intake** | `HW_Submission_Intake.gs`, `Books_Config.gs` | `installTrigger()` (hourly) |
+| **HW Aggregator** | `HW_Submission_Aggregator.gs`, `Books_Config.gs`, `Grader_Status_Report.gs`, `Book_Migration.gs` | `installAggregatorTrigger()` (hourly); `installGraderStatusTriggers()` (Tue + Fri 5 pm) only when grader reminders should go out |
+
+Setup, per project:
+1. Paste the files above and set `MASTER_SHEET_ID` (and, in the intake project, check `CLOCK_OVERRIDE = null` and `SEARCH_WINDOW = '2h'`).
+2. Authorise Gmail, Drive, and Sheets access when prompted.
+3. Test by running `processHomeworkEmails()` / `aggregateHomeworkSubmissions()` manually and checking the execution log.
+4. Install the trigger(s), then set each trigger's failure notification to "Notify me immediately".
+
+Test projects: use a test Master sheet (set `MASTER_SHEET_ID` to it), test aggregates in its `Book_HW` tab, and never link the real aggregates there. The Master sheet's timezone must be `America/New_York` ("(GMT-05:00) Eastern Time"); the Sheets UI's "Toronto" entry is stored as `America/Nassau` and fails the check.
+
+Scripts bound to their own spreadsheet (they use `getActiveSpreadsheet()`): `Group_Comm.gs`, `Quiz_Comm.gs`, and `Progress_Report.gs` (Progress & Certificates sheet).
+
+## Progress report
+
+`Progress_Report.gs` emails each ticked student a progress report. The stage (early / mid / late / final) is picked from how many homework lessons have passed their submission date. The **final** report uses a per-student scenario read from the Progress_Cert tab: column W = "Y" → A1 (met all criteria), else column Y = "Y" → A2 (certificate by manual override), else B (did not qualify); subject is "Final Progress Report". `createProgressReportDrafts()` only saves Gmail drafts and never touches the sheet; `sendProgressReportEmails()` sends, then sets the Sent date (col S) and clears Include (col R). See `Progress_Report_Spec.md`.
 
 ## Key constraints
 
