@@ -61,11 +61,18 @@ const QUIZ_TAB        = 'Quiz_Aggr';
 const ATTENDANCE_TAB  = 'Attendance';
 const HW_TAB          = 'Student_HW_Grades';
 
-const SUBJECT = 'LQM Al-Falah 26 Student Progress Report - Level 1';
+const SUBJECT       = 'LQM Al-Falah 26 Student Progress Report - Level 1';
+const SUBJECT_FINAL = 'LQM Al-Falah 26 Final Progress Report - Level 1';
 
 // Progress_Cert column numbers (1-indexed)
 const PC_INCLUDE_COL      = 18; // R
 const PC_SENT_COL         = 19; // S
+// Final report only: picks the message scenario for each student.
+//   W = "Y"                  → A1  (met all criteria)
+//   else Y = "Y"             → A2  (manual override, certificate awarded by exception)
+//   otherwise                → B   (did not qualify)
+const PC_CERT_ELIGIBLE_COL = 23; // W — calculated certificate eligibility
+const PC_CERT_OVERRIDE_COL = 25; // Y — manual override
 const PC_HEADER_ANCHOR    = 'Student ID'; // header text used to locate the header row
 const PC_HEADER_ANCHOR_COL = 5;            // column E — where the anchor lives
 const PC_HEADER_SCAN_ROWS = 20;            // scan no further than this when hunting
@@ -133,7 +140,7 @@ function processProgressReports_(asDraft) {
   }
 
   const progressData = progressTab
-    .getRange(dataFirstRow, 1, lastRow - dataFirstRow + 1, PC_SENT_COL)
+    .getRange(dataFirstRow, 1, lastRow - dataFirstRow + 1, PC_CERT_OVERRIDE_COL)
     .getValues();
 
   // Certificate-eligibility thresholds — row 2 of Progress_Cert
@@ -155,8 +162,16 @@ function processProgressReports_(asDraft) {
   // The 'final' stage fires only when all lessons are released; it assumes the operator
   // has confirmed all homework has been graded before running.
   const reportStage    = pickReportStage_(hwData.lessons.length);
-  const stageIntroHtml = buildStageIntroHtml_(reportStage);
+  const isFinal        = reportStage === 'final';
+  const stageIntroHtml = buildStageIntroHtml_(reportStage); // '' for 'final' (built per student below)
+  const subject        = isFinal ? SUBJECT_FINAL : SUBJECT;
   Logger.log(`Report stage: ${reportStage} (${hwData.lessons.length} of ${LEVEL_TOTAL_HW_LESSONS} HW lessons released).`);
+  if (isFinal) {
+    // The scenario columns are read by position, so show what the headers say.
+    const hdr = progressTab.getRange(headerRow, 1, 1, PC_CERT_OVERRIDE_COL).getValues()[0];
+    Logger.log(`Final report scenario columns — W: "${hdr[PC_CERT_ELIGIBLE_COL - 1]}", Y: "${hdr[PC_CERT_OVERRIDE_COL - 1]}".`);
+  }
+  const scenarioCounts = { A1: 0, A2: 0, B: 0 };
 
   const today    = new Date();
   const todayFmt = Utilities.formatDate(today, Session.getScriptTimeZone(), 'MMMM d, yyyy');
@@ -206,25 +221,39 @@ function processProgressReports_(asDraft) {
     const quizScoreTable = buildQuizScoreTable_(studentQuiz, quizData);
     const hwGradeTable   = buildHomeworkGradeTable_(studentHw, hwData);
 
+    let introHtml = stageIntroHtml;
+    let scenarioNote = '';
+    if (isFinal) {
+      const scenario = pickFinalScenario_(row[PC_CERT_ELIGIBLE_COL - 1], row[PC_CERT_OVERRIDE_COL - 1]);
+      introHtml = buildFinalIntroHtml_(scenario);
+      scenarioCounts[scenario]++;
+      scenarioNote = ` [scenario ${scenario}]`;
+    }
+
     const htmlBody = buildProgressReportHtml_({
       title, studentName, arabicName, studentId, todayFmt,
-      stageIntroHtml,
+      stageIntroHtml: introHtml, isFinal,
       attendanceLine, quizAttemptedLine, quizScoreTable,
       hwSubmittedLine, hwGradeTable, thresholds,
     });
 
     if (asDraft) {
-      GmailApp.createDraft(email, SUBJECT, '', { htmlBody });
-      Logger.log(`Draft created for student ${studentId} (${email}).`);
+      GmailApp.createDraft(email, subject, '', { htmlBody });
+      Logger.log(`Draft created for student ${studentId} (${email})${scenarioNote}.`);
     } else {
-      GmailApp.sendEmail(email, SUBJECT, '', { htmlBody });
-      Logger.log(`Email sent to student ${studentId} (${email}).`);
+      GmailApp.sendEmail(email, subject, '', { htmlBody });
+      Logger.log(`Email sent to student ${studentId} (${email})${scenarioNote}.`);
+      // Only a real send marks the student as done. Drafting leaves the sheet untouched so a
+      // draft review can be repeated without re-ticking column R.
+      progressTab.getRange(rowNum, PC_SENT_COL).setValue(today);
+      progressTab.getRange(rowNum, PC_INCLUDE_COL).setValue(false);
     }
 
-    progressTab.getRange(rowNum, PC_SENT_COL).setValue(today);
-    progressTab.getRange(rowNum, PC_INCLUDE_COL).setValue(false);
-
     delivered++;
+  }
+
+  if (isFinal) {
+    Logger.log(`Final report scenarios — A1: ${scenarioCounts.A1}, A2: ${scenarioCounts.A2}, B: ${scenarioCounts.B}.`);
   }
 
   Logger.log(`Done. ${delivered} report(s) ${asDraft ? 'drafted' : 'sent'}.`);
@@ -276,16 +305,55 @@ function buildStageIntroHtml_(stage) {
   const earlyP = `<p>Before you look at the numbers, a quick note. This is an <strong>early progress report</strong>. We've only covered a small portion of the lessons and quizzes for this level so far, so if any of your figures are below the Certificate Eligibility values, please don't worry about it. There's plenty of time over the coming weeks to bring them up, إن شاء الله. And if you're already at or above the thresholds, keep it up!</p>`;
   const midP   = `<p>Before you look at the numbers, a quick note. We're now around the <strong>midpoint of the level</strong>, with a good number of lessons and quizzes still ahead. If some of your figures are below the Certificate Eligibility values, there's still time to bring them up with steady effort over the coming weeks, إن شاء الله. And if you're already at or above the thresholds, keep it up!</p>`;
   const lateP  = `<p>Before you look at the numbers, a quick note. We're now in the <strong>final stretch of the level</strong>, with only a few lessons and quizzes left. If some of your figures are below the Certificate Eligibility values, there's still time to push toward them. Even a focused effort over these last weeks can shift things, إن شاء الله. And if you're already at or above the thresholds, keep it up!</p>`;
-  const finalP = `<p>A quick note before you check the numbers. This is your <strong>final progress report for the level</strong>. The figures below reflect your effort across the whole term, and Certificate Eligibility is being assessed against them. Whether you've met every threshold or not, the time you've spent learning the Qur'an is itself the most important part of this journey. Once this level wraps up, we'll start Level 2, which will be a fresh opportunity to work toward the next certificate, إن شاء الله.</p>`;
   const secondP = `<p>And please remember, the certificate is a nice recognition but it isn't the main point of this journey. What really matters is the connection you're building with the Qur'an. As long as you're putting in the effort and learning, you're on the right path.</p>`;
 
   switch (stage) {
     case 'early': return earlyP + secondP;
     case 'mid':   return midP   + secondP;
     case 'late':  return lateP  + secondP;
-    case 'final': return finalP;
+    case 'final': return ''; // the final report is per student — see buildFinalIntroHtml_
   }
   return '';
+}
+
+/**
+ * Final report scenario for one student.
+ *   A1 — column W is "Y": met all the published criteria.
+ *   A2 — column W is not "Y" but the manual override in column Y is "Y": awarded by exception.
+ *   B  — neither: did not qualify.
+ * W takes precedence, so a student with both set is A1.
+ */
+function pickFinalScenario_(eligibleCell, overrideCell) {
+  const isY = v => String(v === null || v === undefined ? '' : v).trim().toUpperCase() === 'Y';
+  if (isY(eligibleCell)) return 'A1';
+  if (isY(overrideCell)) return 'A2';
+  return 'B';
+}
+
+/** Opening section of the final progress report for scenario 'A1' | 'A2' | 'B'. */
+function buildFinalIntroHtml_(scenario) {
+  const banner = text =>
+    `<p style="background:#e8f5e9;border-left:6px solid #2e7d32;padding:14px 18px;font-size:18px;font-weight:bold;color:#1b5e20;">${text}</p>`;
+
+  const certificatesP = `<p>We are currently preparing the certificates and will share yours with you as soon as it is ready, إن شاء الله.</p>`;
+  const level2P       = `<p>Level 2 is already underway. It builds upon the foundational concepts we learnt in Level 1 and progressively introduces concepts that will help you directly in your study of the Holy Qur'an, إن شاء الله.</p>`;
+
+  switch (scenario) {
+    case 'A1':
+      return banner('Congratulations! You have earned the Level 1 Certificate.') +
+        `<p>Alhamdulillah, your attendance, quiz and homework figures below meet all of the published Certificate Eligibility criteria for this level. This reflects consistent effort across the whole term, and we are proud of what you've achieved. Jazakallahu khayran for your dedication to learning the Qur'an.</p>` +
+        certificatesP + level2P;
+
+    case 'A2':
+      return banner('Congratulations! You will be receiving the Level 1 Certificate.') +
+        `<p>One or more of your figures below is slightly under the published Certificate Eligibility values. We reviewed every student's overall effort for this level and allowed some exceptions, for example where a student joined late, or where attendance was slightly below the threshold because of special circumstances. Usually an exception was made for only one of the three areas (attendance, quizzes or homework) where the other two were quite strong, as yours were.</p>` +
+        `<p>Alhamdulillah, we are pleased to award you the certificate. Jazakallahu khayran for your effort.</p>` +
+        certificatesP + level2P;
+
+    default: // 'B'
+      return `<p>Thank you for being part of Al-Falah 26. Looking at the published Certificate Eligibility criteria, your figures below are not quite at the level needed for the Level 1 Certificate this time.</p>` +
+        `<p>But the certificate is only a recognition. What truly matters is what you've gained from the time you've spent with the Qur'an, and that stays with you. We encourage you to keep going. Level 2 is already underway. It builds upon the foundational concepts we learnt in Level 1 and progressively introduces concepts that will help you directly in your study of the Holy Qur'an, إن شاء الله.</p>`;
+  }
 }
 
 // ─── External Sheet Loaders ────────────────────────────────────────────────────
@@ -512,7 +580,7 @@ function buildRatioLine_(numerator, denominator) {
 
 function buildProgressReportHtml_({
   title, studentName, arabicName, studentId, todayFmt,
-  stageIntroHtml,
+  stageIntroHtml, isFinal,
   attendanceLine, quizAttemptedLine, quizScoreTable,
   hwSubmittedLine, hwGradeTable, thresholds,
 }) {
@@ -524,9 +592,20 @@ function buildProgressReportHtml_({
     ? `<strong>Student Name:</strong> <span style="font-size:28px;vertical-align:middle;">${arabicName}</span><br>`
     : '';
 
+  // The final report has no footnotes: the eligibility values are final and every lesson is
+  // released, so neither the "might be adjusted" (*) nor the "future lessons" (**) note applies.
+  const eligibilityMark = isFinal ? '' : '*';
+  const homeworkMark    = isFinal ? '' : '<span style="font-size:13px;vertical-align:super;">**</span>';
+  const footnotesHtml   = isFinal ? '' : `
+<p style="margin-top:24px;color:#555;font-size:12px;">
+  <em>* Certificate Eligibility values might be adjusted as we get closer to the end of this level.</em><br>
+  <em>** Lessons whose submission date is in future are not included in this list.</em>
+</p>
+`;
+
   const eligibility = (value, asPct) => {
     const formatted = asPct ? formatPct_(value) : formatNum_(value);
-    return `<span style="${eligibilityStyle}">Certificate Eligibility:* ${formatted}</span>`;
+    return `<span style="${eligibilityStyle}">Certificate Eligibility:${eligibilityMark} ${formatted}</span>`;
   };
 
   return `<!DOCTYPE html>
@@ -562,7 +641,7 @@ ${stageIntroHtml}
   <p style="margin-top:6px;">${eligibility(thresholds.quizScorePct, true)}</p>
 </div>
 
-<h3 style="${sectionHeaderStyle}">Homework<span style="font-size:13px;vertical-align:super;">**</span></h3>
+<h3 style="${sectionHeaderStyle}">Homework${homeworkMark}</h3>
 <div style="${sectionBodyStyle}">
   <p>
     <strong>Lesson Homework Submitted:</strong> ${hwSubmittedLine}<br>
@@ -571,12 +650,7 @@ ${stageIntroHtml}
   ${hwGradeTable}
   <p style="margin-top:6px;">${eligibility(thresholds.hwAvgGrade, false)}</p>
 </div>
-
-<p style="margin-top:24px;color:#555;font-size:12px;">
-  <em>* Certificate Eligibility values might be adjusted as we get closer to the end of this level.</em><br>
-  <em>** Lessons whose submission date is in future are not included in this list.</em>
-</p>
-
+${footnotesHtml}
 <p style="margin-top:8px;color:#888;font-size:12px;"><em>System generated email.</em></p>
 
 </body>

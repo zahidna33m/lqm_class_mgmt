@@ -249,11 +249,23 @@ A short, tone-setting block sits immediately after the greeting. It is chosen au
 | `late`  | `< 1.00` | 15–19 | lessons 18–22 | After lesson 19 (16 HW released) |
 | `final` | `= 1.00` | 20 | lesson 23 | After lesson 23 — **assumes operator has verified all grading is complete** before running |
 
-Each stage contributes one short paragraph tailored to where the level is at. The paragraph uses a conditional framing: it reassures students whose numbers are below the Certificate Eligibility thresholds, and encourages students whose numbers are already at or above them. The `final` paragraph additionally mentions that Level 2 will begin after this level wraps up — a fresh opportunity for any student who didn't qualify this time.
+Each stage contributes one short paragraph tailored to where the level is at. The paragraph uses a conditional framing: it reassures students whose numbers are below the Certificate Eligibility thresholds, and encourages students whose numbers are already at or above them. The `final` stage is different: it is chosen per student from one of three scenarios (see below).
 
-For `early`, `mid`, and `late`, a second timeless paragraph also appears, reminding the student that the certificate is a recognition rather than the main point of the journey, and that what matters is the connection they're building with the Qur'an. The `final` stage omits this second paragraph because its first paragraph already lands on that note.
+For `early`, `mid`, and `late`, a second timeless paragraph also appears, reminding the student that the certificate is a recognition rather than the main point of the journey, and that what matters is the connection they're building with the Qur'an. The `final` stage omits this second paragraph because each scenario's text already lands on that note.
 
-The exact wording lives in `buildStageIntroHtml_`. Update there to change copy.
+The exact wording lives in `buildStageIntroHtml_` (early / mid / late) and `buildFinalIntroHtml_` (final). Update there to change copy.
+
+**Final report scenarios.** The subject becomes `LQM Al-Falah 26 Final Progress Report - Level 1` (`SUBJECT_FINAL`). Each student gets one of three messages, chosen by `pickFinalScenario_` from two columns of `Progress_Cert` (case-insensitive "Y", blank/anything else = no):
+
+| Scenario | Rule | Message |
+| --- | --- | --- |
+| A1 | column W (calculated eligibility) = Y | Highlighted congratulations banner; met all criteria; certificates being prepared and shared when ready; Level 2 is underway |
+| A2 | column W is not Y and column Y (manual override) = Y | Same banner; explains exceptions were allowed (e.g. joined late, attendance slightly under); certificates being prepared; Level 2 is underway |
+| B  | neither | Did not qualify under the published criteria; softly worded encouragement; Level 2 is underway and builds on Level 1 |
+
+W takes precedence, so a student with both W and Y set is A1. The final report omits both footnotes (the "values might be adjusted" `*` and the "future lessons" `**` notes). The run logs the headers found in columns W and Y and the count of A1/A2/B students.
+
+**Draft vs send.** `createProgressReportDrafts()` only saves Gmail drafts and does not touch the sheet. `sendProgressReportEmails()` sends and then writes column S (Sent date) and clears column R (Include).
 
 The chosen stage is logged at run time (`Report stage: X (N of Y lessons released).`).
 
