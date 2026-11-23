@@ -14,10 +14,49 @@ Settings (template, CSV, output folder) live in make_certificates.txt next to th
 overridden on the command line (--template, --csv, --output-dir). There are no built-in defaults:
 if neither the config nor a flag gives a value, the script stops and says which one is missing.
 
-Usage (from the project folder):
+One-time setup (needs Python 3; requirements-certificates.txt lists python-pptx and pypdf):
+  python3 -m venv .venv-certs
+  .venv-certs/bin/pip install -r requirements-certificates.txt
+
+Usage (run from the folder that holds this script; use the venv's python):
   .venv-certs/bin/python make_certificates.py build                      # uses make_certificates.txt
   .venv-certs/bin/python make_certificates.py build --csv other.csv      # override one setting
-  .venv-certs/bin/python make_certificates.py split
+  .venv-certs/bin/python make_certificates.py split --csv other.csv      # same --csv as the build
+
+Options
+  build  --csv FILE          student CSV            (overrides "csv" in the config file)
+         --template FILE     template .pptx         (overrides "template")
+         --output-dir DIR    output folder          (overrides "output_dir")
+         --limit N           only the first N students, for a quick test
+         --urdu-to-arabic    replace Urdu letters (ٹ ھ ں …) with the standard Arabic letters so they
+                             join in the template font. CHANGES the spelling on the certificate.
+  split  --csv FILE          the CSV used for the build; it decides the file names (config "csv" if omitted)
+         --output-dir DIR    output folder          (overrides "output_dir")
+         --pdf FILE          the printed PDF (default: <output_dir>/<csv name>.pdf)
+         --overwrite         replace per-student PDFs that already exist
+
+Config file make_certificates.txt (same folder as this script; plain text, open in TextEdit):
+  template = <the .pptx template>        csv = <the student CSV>        output_dir = <output folder>
+  Format "name = value", no quotes, "#" starts a comment. Relative paths are relative to the config
+  file's folder; paths given on the command line are relative to where you run the command.
+
+Checklist for a new batch (e.g. Book 2)
+  1. In the Progress sheet, set column Z = "Y" for each student who gets a certificate, then
+     LQM Progress → Export Certificate CSV, and save the CSV next to this script.
+  2. Put the template .pptx there too. If it changed, check the markers and the Brother/Sister layouts.
+  3. Edit make_certificates.txt: set "template" and "csv" (or pass --csv / --template instead).
+  4. build. Read the output: the NOTE lines (names shrunk to fit, very long names), the
+     "Found non-Arabic letter(s)" lines, and the SUMMARY counts. Fix the sheet and re-export if needed.
+  5. Open <csv name>.pptx in PowerPoint → File → Print → PDF → save as <output_dir>/<csv name>.pdf.
+     Do NOT use Export as PDF: it garbles the ChopinScript font.
+  6. split. It refuses to run if the PDF's page count differs from the manifest. Results are in
+     <output_dir>/pdf/{StudentID}_{Name}.pdf.
+
+Output order: all male certificates first, then all female (the CSV order is kept within each group).
+The manifest and the split follow the same order. Names are trimmed of leading/trailing spaces and
+invisible characters. A name wider than its box is shrunk (down to 65%) and reported as a NOTE.
+The Arabic width is only estimated (the template's Arabic font may not be installed), so check the
+flagged certificates on the printed PDF.
 
 Template: the .pptx has one slide per gender. Which slide is male / female is detected from the
 slide's layout text ("Brother" / "Sister"). The name boxes hold the markers `name_en` and `name_ar`
