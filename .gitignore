@@ -15,3 +15,14 @@ package-lock.json
 # Logs
 *.log
 *.jpg
+
+# Certificate templates and generated certificates (not for GitHub)
+*.pptx
+
+# Student data and generated certificates (not for GitHub)
+*.csv
+*.pdf
+
+# Certificate generator: virtualenv and output
+.venv-certs/
+certificates_out/

@@ -100,6 +100,8 @@ function onOpen() {
     .createMenu('LQM Progress')
     .addItem('Create Progress Report Drafts', 'createProgressReportDrafts')
     .addItem('Send Progress Report Emails',  'sendProgressReportEmails')
+    .addSeparator()
+    .addItem('Export Certificate CSV',       'exportCertificateCsv')   // Certificate_Export.gs
     .addToUi();
 }
 

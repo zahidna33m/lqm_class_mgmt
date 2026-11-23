@@ -77,6 +77,7 @@ Each group folder contains one Google Sheet. It has a single tab named **HW_Subm
 | `HW_Submitted` | Processed successfully into correct group |
 | `HW Submission Error` | Fell back to G00 (unknown student or bad group config) |
 | `HW No Attachment` | Email had no PDF — needs manual follow-up |
+| `HW_System_Error` | Our side failed on a valid email (unhandled exception, or the row was not found in the sheet after `appendRow`). Check the execution log promptly; the thread is not reprocessed. The PDF may already be saved. |
 
 Labels are created automatically by the script on first run if they don't exist.
 

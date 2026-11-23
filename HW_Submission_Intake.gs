@@ -124,6 +124,9 @@ const LABEL_ERROR         = 'HW Submission Error';
 const LABEL_NO_ATTACHMENT = 'HW No Attachment';
 const LABEL_DUPLICATE     = 'HW Duplicate Submission';
 const LABEL_NO_GROUP      = 'HW_No_Group_Assigned';
+// Our side failed while processing an otherwise valid email (exception, or the row could not be
+// confirmed in the sheet). Review the execution log promptly — Apps Script logs are not kept long.
+const LABEL_SYSTEM_ERROR  = 'HW_System_Error';
 const HW_SHEET_TAB        = 'HW_Submissions';
 
 // Testing only: set to a Date to make the book rule treat that as the email's date.
@@ -147,6 +150,7 @@ function processHomeworkEmails() {
     `-label:"${LABEL_NO_ATTACHMENT}"`,
     `-label:"${LABEL_DUPLICATE}"`,
     `-label:${LABEL_NO_GROUP}`,
+    `-label:${LABEL_SYSTEM_ERROR}`,
     `newer_than:${SEARCH_WINDOW}`,
   ].join(' ');
 
@@ -158,6 +162,7 @@ function processHomeworkEmails() {
       processThread(thread, labels, master);
     } catch (e) {
       Logger.log(`Unhandled error on thread ${thread.getId()}: ${e}\n${e.stack}`);
+      markSystemError(thread, labels, `Unhandled error: ${e}`);
     }
   }
 }
@@ -285,8 +290,10 @@ function processThread(thread, labels, master) {
   const file     = folder.createFile(pdf.copyBlob().setName(filename));
   const studentName = student ? student.studentName : from.split('@')[0];
 
+  const submissionId = Utilities.getUuid();
+  const lastRowBefore = sheet.getLastRow();
   sheet.appendRow([
-    Utilities.getUuid(),                             // Submission ID (hidden import key)
+    submissionId,                                    // Submission ID (hidden import key)
     new Date(),                                      // Timestamp
     student   ? student.studentId   : '',            // Student ID
     studentName,                                     // Student Name (email username if unknown)
@@ -298,13 +305,51 @@ function processThread(thread, labels, master) {
     '',                                              // Grade  (grader fills in)
     subjectSidComment,                               // Comments (system note if subject ID was unrecognised)
   ]);
+
+  // Read the row back. appendRow returning without error is not proof the row is in the sheet.
+  SpreadsheetApp.flush();
+  const writtenRow = findWrittenRow(sheet, lastRowBefore, submissionId);
+  if (!writtenRow) {
+    markSystemError(thread, labels,
+      `Row NOT found in sheet ${sheetId} (group ${group.groupId}) after appendRow; ` +
+      `submission ID ${submissionId}, rows before = ${lastRowBefore}, rows now = ${sheet.getLastRow()}. ` +
+      `PDF was saved as "${filename}" (${file.getUrl()}).`);
+    return;
+  }
   Logger.log(
-    `Saved "${filename}" → group ${group.groupId}` +
+    `Saved "${filename}" → group ${group.groupId} (sheet ${sheetId}, row ${writtenRow})` +
     (student ? ` (student ${student.studentId})` : ` (unknown student, logged as "${studentName}")`)
   );
 
   // 9. Label the thread so it is never reprocessed.
   thread.addLabel(usingG00 ? labels.error : labels.processed);
+}
+
+/**
+ * Returns the 1-based row number holding submissionId among the rows added after
+ * `lastRowBefore`, or 0 if it is not there.
+ */
+function findWrittenRow(sheet, lastRowBefore, submissionId) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= lastRowBefore) return 0;
+  const ids = sheet.getRange(lastRowBefore + 1, 1, lastRow - lastRowBefore, 1).getValues();
+  for (let i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]) === submissionId) return lastRowBefore + 1 + i;
+  }
+  return 0;
+}
+
+/**
+ * Our side failed on a thread (not the student's fault). Label it HW_System_Error so it is
+ * never reprocessed and is easy to find, and log the reason for whoever reviews the execution log.
+ */
+function markSystemError(thread, labels, reason) {
+  Logger.log(`SYSTEM ERROR on thread ${thread.getId()}: ${reason}`);
+  try {
+    thread.addLabel(labels.systemError);
+  } catch (e) {
+    Logger.log(`Could not apply "${LABEL_SYSTEM_ERROR}" to thread ${thread.getId()}: ${e}`);
+  }
 }
 
 // ─── Master Data Loader ────────────────────────────────────────────────────────
@@ -673,6 +718,7 @@ function ensureLabels() {
     noAttachment: getOrCreateLabel(LABEL_NO_ATTACHMENT),
     duplicate:    getOrCreateLabel(LABEL_DUPLICATE),
     noGroup:      getOrCreateLabel(LABEL_NO_GROUP),
+    systemError:  getOrCreateLabel(LABEL_SYSTEM_ERROR),
   };
 }
 

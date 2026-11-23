@@ -1,0 +1,21 @@
+# Settings for make_certificates.py. Open and edit this in TextEdit or any text editor.
+# Read automatically from this file, which sits next to the script.
+#
+# Format: one  name = value  per line. NO quotes needed (spaces in file names are fine).
+# Lines starting with # are comments. Keep the names on the left exactly as they are.
+#
+# Any of these can be overridden on the command line:  --template  --csv  --output-dir
+# Relative paths here are relative to THIS file's folder. Paths given on the command
+# line are relative to the folder you run the command from.
+#
+# If you edit this in TextEdit, make sure it is in plain text mode (Format > Make Plain Text).
+
+# The PowerPoint template: one slide per gender, with the markers name_en and name_ar.
+template = LQM_Certificate_Template - ZN.pptx
+
+# The student list exported from the Progress sheet (LQM Progress -> Export Certificate CSV).
+# Change this for each batch, or pass --csv.
+csv = certificate_students.csv
+
+# Where the combined deck, manifest and per-student PDFs go.
+output_dir = certificates_out
