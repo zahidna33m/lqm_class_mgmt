@@ -43,7 +43,7 @@
  */
 
 // Which book's aggregate the report reads. Change this when a new book takes over grading.
-const REPORT_BOOK = 1;
+const REPORT_BOOK = 2;
 
 // ─── Menu ──────────────────────────────────────────────────────────────────────
 
@@ -199,7 +199,7 @@ function buildStatusEmailHtml(prefix, name, byLesson, groups) {
 
 <p>Assalaamu alaykum ${prefix} ${name},</p>
 
-<p>Here is an update on your assigned Arabic homework grading tasks.</p>
+<p>Here is an update on your assigned Arabic homework grading tasks for Book ${REPORT_BOOK}.</p>
 
 <p><strong>Your Current Status:</strong></p>
 ${buildLessonTable(byLesson)}
